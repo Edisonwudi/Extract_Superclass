@@ -2,19 +2,19 @@
 
 ## 功能概述
 
-Extract Superclass 重构工具通过为两个或多个原本无关的类引入一个新的抽象父类，并将其作为它们的共同父类，来实现继承关系的建立。
+Extract Superclass 重构工具通过为两个或多个原本无继承关系的类引入一个新的抽象父类，并将其作为它们的共同父类，来建立继承结构。
 
 ## 工具目的
 
-让选定的类具备继承关系，以便后续进行模板化方法重构等操作。
+让选定的类具备可维护的继承关系，为后续的模板方法、代码复用等重构操作创造条件。
 
 ## 技术特性
 
-- 采用 Eclipse JDT 进行 Java 代码分析和重构
-- 支持 CLI 形式调用
+- 采用 Eclipse JDT 进行 Java 代码分析与重写
+- 支持命令行（CLI）方式调用
 - 自动处理包结构和导入语句
 - 智能命名抽象超类
-- 支持多种继承情况处理
+- 多种继承场景下的兼容处理
 
 ## 使用方法
 
@@ -54,11 +54,43 @@ java -jar target/extractsuperclass-cli.jar /path/to/project --classNames com.exa
 java -jar target/extractsuperclass-cli.jar /path/to/project --classNames com.example.ProcessorA,com.example.ProcessorB --verbose
 ```
 
+### MCP 集成
+
+完成 `mvn package` 后会生成 `target/extractsuperclass-mcp-server.jar`。可按以下方式在支持 MCP 协议的代理（如 Cline）中通过 stdio 启动：
+
+```json
+{
+  "mcpServers": {
+    "extract-superclass-refactoring": {
+      "type": "stdio",
+      "command": "java",
+      "args": [
+        "-jar",
+        "C:/path/to/extractsuperclass-mcp-server.jar"
+      ],
+      "timeout": 60000,
+      "autoApprove": [
+        "extract_superclass"
+      ],
+      "env": {
+        "JAVA_OPTS": "-Xmx512m"
+      }
+    }
+  }
+}
+```
+
+暴露出的工具名称为 `extract_superclass`，核心参数包括：
+
+- `projectRoot`：项目根目录路径（例如 `C:/Users/wudi/Desktop/project`，支持使用逗号分隔多个模块路径）
+- `classNames`：需要重构的类名数组，必须是完全限定名且至少两个
+- 可选参数：`superQualifiedName`/`superName`
+
+服务会复用 CLI 的实现逻辑，返回文本摘要以及 `modifiedFiles`、`executionTimeMs` 等结构化信息。
+
 ## 工具行为
 
 ### 继承情况分析
-
-工具会根据输入类的当前继承情况采取不同的策略：
 
 1. **所有类都没有超类**：创建新的抽象超类，让所有类继承它
 2. **只有一个类有超类**：让其他没有超类的类继承该超类
@@ -66,39 +98,22 @@ java -jar target/extractsuperclass-cli.jar /path/to/project --classNames com.exa
 
 ### 超类命名规则
 
-- 如果用户指定了 `--superName`，使用指定的名称
-- 否则，基于输入类的共同前缀生成名称（如 `AbstractProcessor`）
-- 如果无法找到共同前缀，使用 `AbstractBase` 作为默认名称
+- 如果用户指定了 `--superName`，则直接使用
+- 否则基于输入类的共同前缀生成名称（如 `AbstractProcessor`）
+- 若无法找到共同前缀，则使用 `AbstractBase` 作为默认名称
 
 ### 包位置选择
 
-- 如果用户指定了 `--targetPackage`，在指定包中创建超类
-- 否则，选择输入类中最常见的包作为超类位置
+- 如果指定了 `--targetPackage`，将在该包中创建超类
+- 否则选择输入类中最常见的包作为超类位置
 
 ## 构建和运行
 
-### 构建项目
-
 ```bash
-mvn clean compile
-```
-
-### 运行测试
-
-```bash
-mvn test
-```
-
-### 打包
-
-```bash
-mvn package
-```
-
-### 运行工具
-
-```bash
-java -jar target/extractsuperclass-cli.jar [参数]
+mvn clean compile   # 构建项目
+mvn test            # 运行测试
+mvn package         # 打包（生成 CLI 与 MCP server）
+java -jar target/extractsuperclass-cli.jar [参数]   # 运行 CLI 工具
 ```
 
 ## 项目结构
@@ -106,6 +121,7 @@ java -jar target/extractsuperclass-cli.jar [参数]
 ```
 src/main/java/com/refactoring/extractsuperclass/
 ├── ExtractSuperclassCLI.java          # 命令行接口
+├── ExtractSuperclassMcpServer.java    # MCP stdio server 适配器
 ├── ExtractSuperclassRefactorer.java   # 核心重构逻辑
 ├── ExtractSuperclassRequest.java      # 请求参数类
 └── ExtractSuperclassResult.java       # 结果返回类
@@ -117,6 +133,7 @@ src/main/java/com/refactoring/extractsuperclass/
 - Picocli 4.7.5
 - SLF4J 1.7.36
 - Logback 1.2.13
+- Jackson Databind 2.17.1
 - JUnit Jupiter 5.10.2
 
 ## 许可证

@@ -1,0 +1,20 @@
+{
+  "mcpServers": {
+    "extract-superclass-refactoring": {
+      "disabled": false,
+      "type": "stdio",
+      "command": "java",
+      "args": [
+        "-jar",
+        "C:/Users/wudi/Desktop/extension_develop/Extract_Superclass/target/extractsuperclass-mcp-server.jar"
+      ],
+      "timeout": 60000,
+      "autoApprove": [
+        "extract_superclass"
+      ],
+      "env": {
+        "JAVA_OPTS": "-Xmx512m"
+      }
+    }
+  }
+}
