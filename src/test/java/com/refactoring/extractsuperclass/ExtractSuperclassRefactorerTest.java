@@ -118,4 +118,47 @@ public class ExtractSuperclassRefactorerTest {
         assertTrue(aAfter.contains("class A extends P1"));
         assertTrue(bAfter.contains("class B extends P2"));
     }
+
+    @Test
+    public void externalSuperclass_requiresImportForNewSubclass(@TempDir Path tmp) throws Exception {
+        Path src = tmp.resolve("src");
+        Files.createDirectories(src);
+
+        Path pkgDir = src.resolve("com/example/gui");
+        Files.createDirectories(pkgDir);
+
+        String viewSrc = ""
+            + "package com.example.gui;\n\n"
+            + "import javax.swing.JComponent;\n\n"
+            + "public class DefaultDrawingView extends JComponent implements Runnable {\n"
+            + "    public void run() { }\n"
+            + "}\n";
+        String editorSrc = ""
+            + "package com.example.gui;\n\n"
+            + "public class DrawingEditor {\n"
+            + "}\n";
+
+        Path viewFile = pkgDir.resolve("DefaultDrawingView.java");
+        Path editorFile = pkgDir.resolve("DrawingEditor.java");
+        Files.writeString(viewFile, viewSrc, StandardCharsets.UTF_8);
+        Files.writeString(editorFile, editorSrc, StandardCharsets.UTF_8);
+
+        ExtractSuperclassRefactorer ref = new ExtractSuperclassRefactorer(Arrays.asList(src.toFile()));
+        ExtractSuperclassRequest req = new ExtractSuperclassRequest(
+            Arrays.asList("com.example.gui.DefaultDrawingView", "com.example.gui.DrawingEditor"),
+            null,
+            "com.example.gui",
+            false,
+            true
+        );
+
+        ExtractSuperclassResult res = ref.performRefactoring(req);
+        assertTrue(res.isSuccess(), () -> "refactoring failed: " + res.getErrorMessage());
+        assertEquals("javax.swing.JComponent", res.getSuperclassQualifiedName());
+
+        String editorAfter = Files.readString(editorFile, StandardCharsets.UTF_8);
+        assertTrue(editorAfter.contains("extends JComponent"), "New subclass missing extends clause");
+        assertTrue(editorAfter.contains("import javax.swing.JComponent;"), "Missing import for external superclass");
+        assertFalse(editorAfter.contains("extends javax.swing.JComponent"), "Should rely on import for external superclass");
+    }
 }

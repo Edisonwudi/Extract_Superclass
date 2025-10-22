@@ -73,7 +73,7 @@ public class ExtractSuperclassRefactorer {
 						if (!Objects.equals(original, updated)) {
 							Files.writeString(p, updated, StandardCharsets.UTF_8);
 							modified.add(p.toString());
-							try { organizeImports(env, p, updated); } catch (Throwable ex) { logger.debug("Import organization skipped for {}: {}", p, String.valueOf(ex.getMessage())); }
+							try { organizeImports(env, p, updated, Collections.emptyList()); } catch (Throwable ex) { logger.debug("Import organization skipped for {}: {}", p, String.valueOf(ex.getMessage())); }
 						}
 					}
 					try {
@@ -90,7 +90,10 @@ public class ExtractSuperclassRefactorer {
 				TargetType pivot = situation.oneWith;
 				// Determine pivot's current superclass name (prefer FQN if resolvable)
 				String pivotSuperSimple = pivot.typeDecl.getSuperclassType() != null ? pivot.typeDecl.getSuperclassType().toString() : null;
-				String pivotSuperFqn = resolveTypeNameToFqn(env, pivotSuperSimple, pivot.packageName);
+				String pivotSuperFqn = resolveExistingSuperclassQualifiedName(env, pivot);
+				if (pivotSuperFqn == null) {
+					pivotSuperFqn = resolveTypeNameToFqn(env, pivotSuperSimple, pivot.packageName);
+				}
 				resultingSuperName = pivotSuperFqn != null ? pivotSuperFqn : pivotSuperSimple;
 				if (!request.dryRun()) {
 					for (TargetType t : targets) {
@@ -99,7 +102,13 @@ public class ExtractSuperclassRefactorer {
 						if (t.typeDecl.getSuperclassType() != null) continue;
 						Path p = t.filePath;
 						String original = Files.readString(p, StandardCharsets.UTF_8);
-						String superNameToUse = pivotSuperFqn != null ? pivotSuperFqn : pivotSuperSimple;
+						String superNameToUse;
+						if (pivotSuperFqn != null) {
+							NameParts parts = NameParts.fromQualified(pivotSuperFqn);
+							superNameToUse = parts.simple;
+						} else {
+							superNameToUse = pivotSuperSimple;
+						}
 						if (superNameToUse == null || superNameToUse.isEmpty()) {
 							continue; // nothing to do if we cannot determine a superclass
 						}
@@ -107,7 +116,16 @@ public class ExtractSuperclassRefactorer {
 						if (!Objects.equals(original, updated)) {
 							Files.writeString(p, updated, StandardCharsets.UTF_8);
 							modified.add(p.toString());
-							try { organizeImports(env, p, updated); } catch (Throwable ex) { logger.debug("Import organization skipped for {}: {}", p, String.valueOf(ex.getMessage())); }
+							try {
+								List<String> ensureImports = Collections.emptyList();
+								if (pivotSuperFqn != null) {
+									NameParts parts = NameParts.fromQualified(pivotSuperFqn);
+									if (!parts.pkg.isEmpty() && !parts.pkg.equals(t.packageName)) {
+										ensureImports = Collections.singletonList(pivotSuperFqn);
+									}
+								}
+								organizeImports(env, p, updated, ensureImports);
+							} catch (Throwable ex) { logger.debug("Import organization skipped for {}: {}", p, String.valueOf(ex.getMessage())); }
 						}
 					}
 				}
@@ -476,17 +494,30 @@ public class ExtractSuperclassRefactorer {
 		}
 	}
 
-	private void organizeImports(RefEnv env, Path filePath, String updated) throws Exception {
-		CompilationUnit cu = parseWithEnv(env, updated, filePath);
-		ImportRewrite rewrite = ImportRewrite.create(cu, true);
-		rewrite.setOnDemandImportThreshold(99);
-		rewrite.setStaticOnDemandImportThreshold(2);
-		TextEdit edit = rewrite.rewriteImports(null);
-		Document doc = new Document(updated);
-		edit.apply(doc);
-		String after = doc.get();
-		if (!Objects.equals(updated, after)) {
-			Files.writeString(filePath, after, StandardCharsets.UTF_8);
+	private void organizeImports(RefEnv env, Path filePath, String updated, Collection<String> ensureImports) throws Exception {
+		try {
+			CompilationUnit cu = parseWithEnv(env, updated, filePath);
+			ImportRewrite rewrite = ImportRewrite.create(cu, true);
+			rewrite.setOnDemandImportThreshold(99);
+			rewrite.setStaticOnDemandImportThreshold(2);
+			if (ensureImports != null) {
+				for (String qualified : ensureImports) {
+					if (qualified == null || qualified.isEmpty()) continue;
+					if (!qualified.contains(".")) continue;
+					rewrite.addImport(qualified);
+				}
+			}
+			TextEdit edit = rewrite.rewriteImports(null);
+			Document doc = new Document(updated);
+			edit.apply(doc);
+			String after = doc.get();
+			if (!Objects.equals(updated, after)) {
+				Files.writeString(filePath, after, StandardCharsets.UTF_8);
+			}
+		} catch (RuntimeException ex) {
+			if (!attemptManualImportInsertion(filePath, updated, ensureImports)) {
+				throw ex;
+			}
 		}
 	}
 
@@ -733,5 +764,143 @@ public class ExtractSuperclassRefactorer {
 			if (fqn.endsWith("." + typeName) || fqn.equals(typeName)) return fqn;
 		}
 		return null;
+	}
+
+	private String resolveExistingSuperclassQualifiedName(RefEnv env, TargetType type) {
+		if (type == null || type.typeDecl.getSuperclassType() == null) return null;
+		Type superType = type.typeDecl.getSuperclassType();
+		ITypeBinding binding = superType.resolveBinding();
+		if (binding != null) {
+			String qualified = binding.getQualifiedName();
+			if (qualified != null && !qualified.isEmpty()) {
+				return qualified;
+			}
+		}
+		String rawName = baseTypeName(superType.toString());
+		if (rawName == null || rawName.isEmpty()) {
+			return null;
+		}
+		String resolved = resolveTypeNameToFqn(env, rawName, type.packageName);
+		if (resolved != null) {
+			return resolved;
+		}
+		ASTNode root = type.typeDecl.getRoot();
+		if (root instanceof CompilationUnit) {
+			CompilationUnit cu = (CompilationUnit) root;
+			List<?> imports = cu.imports();
+			String simple = extractSimpleName(rawName);
+			for (Object obj : imports) {
+				if (!(obj instanceof ImportDeclaration)) continue;
+				ImportDeclaration imp = (ImportDeclaration) obj;
+				if (imp.isOnDemand()) continue;
+				String fqn = imp.getName().getFullyQualifiedName();
+				if (fqn.equals(rawName)) {
+					return fqn;
+				}
+				if (simple != null && fqn.endsWith("." + simple)) {
+					return fqn;
+				}
+			}
+		}
+		return null;
+	}
+
+	private String baseTypeName(String typeName) {
+		if (typeName == null) return null;
+		String stripped = typeName.trim();
+		int genericIdx = stripped.indexOf('<');
+		if (genericIdx >= 0) stripped = stripped.substring(0, genericIdx);
+		int arrayIdx = stripped.indexOf('[');
+		if (arrayIdx >= 0) stripped = stripped.substring(0, arrayIdx);
+		return stripped.trim();
+	}
+
+	private String extractSimpleName(String typeName) {
+		if (typeName == null) return null;
+		String stripped = baseTypeName(typeName);
+		if (stripped == null) return null;
+		int dotIdx = stripped.lastIndexOf('.');
+		if (dotIdx >= 0 && dotIdx + 1 < stripped.length()) {
+			return stripped.substring(dotIdx + 1);
+		}
+		return stripped;
+	}
+
+	private boolean attemptManualImportInsertion(Path filePath, String updated, Collection<String> ensureImports) throws Exception {
+		if (ensureImports == null || ensureImports.isEmpty()) {
+			return false;
+		}
+		String content = updated;
+		List<String> toAdd = new ArrayList<>();
+		for (String qualified : ensureImports) {
+			if (qualified == null || qualified.isEmpty()) continue;
+			String statement = "import " + qualified + ";";
+			if (content.contains(statement)) {
+				continue;
+			}
+			if (!qualified.contains(".")) {
+				continue;
+			}
+			toAdd.add(qualified);
+		}
+		if (toAdd.isEmpty()) {
+			return true; // imports already present
+		}
+		int lastImportEnd = -1;
+		int searchIdx = 0;
+		while (true) {
+			int idx = content.indexOf("import ", searchIdx);
+			if (idx < 0) break;
+			int semi = content.indexOf(';', idx);
+			if (semi < 0) break;
+			lastImportEnd = semi + 1;
+			searchIdx = semi + 1;
+		}
+		StringBuilder builder = new StringBuilder();
+		if (lastImportEnd >= 0) {
+			builder.append(content, 0, lastImportEnd);
+			if (lastImportEnd == content.length() || content.charAt(lastImportEnd) != '\n') {
+				builder.append('\n');
+			}
+			for (String qualified : toAdd) {
+				builder.append("import ").append(qualified).append(";\n");
+			}
+			if (lastImportEnd < content.length()) {
+				if (content.charAt(lastImportEnd) != '\n') {
+					builder.append('\n');
+				}
+				builder.append(content.substring(lastImportEnd));
+			}
+		} else {
+			int pkgIdx = content.indexOf("package ");
+			int insertIdx = 0;
+			if (pkgIdx >= 0) {
+				int semi = content.indexOf(';', pkgIdx);
+				if (semi >= 0) {
+					insertIdx = semi + 1;
+					while (insertIdx < content.length()) {
+						char ch = content.charAt(insertIdx);
+						if (ch == '\r' || ch == '\n') {
+							insertIdx++;
+						} else {
+							break;
+						}
+					}
+				}
+			}
+			builder.append(content, 0, insertIdx);
+			if (insertIdx > 0) {
+				builder.append('\n').append('\n');
+			}
+			for (String qualified : toAdd) {
+				builder.append("import ").append(qualified).append(";\n");
+			}
+			if (insertIdx == 0) {
+				builder.append('\n');
+			}
+			builder.append(content.substring(insertIdx));
+		}
+		Files.writeString(filePath, builder.toString(), StandardCharsets.UTF_8);
+		return true;
 	}
 }
