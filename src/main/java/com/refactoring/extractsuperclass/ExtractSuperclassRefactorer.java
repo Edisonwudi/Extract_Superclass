@@ -56,15 +56,17 @@ public class ExtractSuperclassRefactorer {
 
 			if (situation.kind == SuperSituationKind.ALL_NONE) {
 				// Create new abstract superclass and set for all
-				NameParts name = planSuperclassName(request, targets);
-				if (name.simple == null || name.simple.isEmpty()) {
+				NameParts plannedName = planSuperclassName(request, targets);
+				if (plannedName.simple == null || plannedName.simple.isEmpty()) {
 					return ExtractSuperclassResult.failure("Invalid superclass name plan").executionTimeMs(elapsed(start)).build();
 				}
+				SuperclassPlacement placement = planSuperclassPlacement(env, request, plannedName);
+				NameParts name = placement.name;
 				resultingSuperName = name.qualified();
 				Path superFile = null;
 				if (!request.dryRun()) {
-					// Place new superclass relative to the first target's source root (same module/src tree)
-					superFile = ensureSuperclassFileNearType(env, name, targets.get(0));
+					TargetType anchor = targets.isEmpty() ? null : targets.get(0);
+					superFile = ensureSuperclassFile(env, placement, anchor, null);
 					if (superFile != null) modified.add(superFile.toString());
 					for (TargetType t : targets) {
 						Path p = t.filePath;
@@ -130,8 +132,53 @@ public class ExtractSuperclassRefactorer {
 					}
 				}
 			} else {
-				// TWO_OR_MORE_HAVE: Do nothing
-				resultingSuperName = null;
+				String sharedSuper = findCommonSuperclassQualifiedName(env, targets);
+				if (sharedSuper != null) {
+					NameParts plannedName = planSuperclassName(request, targets);
+					if (plannedName.simple == null || plannedName.simple.isEmpty()) {
+						return ExtractSuperclassResult.failure("Invalid superclass name plan").executionTimeMs(elapsed(start)).build();
+					}
+					SuperclassPlacement placement = planSuperclassPlacement(env, request, plannedName);
+					NameParts name = placement.name;
+					resultingSuperName = name.qualified();
+					Path superFile = null;
+					if (!request.dryRun()) {
+						TargetType anchor = targets.isEmpty() ? null : targets.get(0);
+						superFile = ensureSuperclassFile(env, placement, anchor, sharedSuper);
+						if (superFile != null) {
+							modified.add(superFile.toString());
+						}
+						for (TargetType t : targets) {
+							Path p = t.filePath;
+							String original = Files.readString(p, StandardCharsets.UTF_8);
+							String updated = rewriteTypeToExtend(original, t.typeDecl, name.simple, /*allowReplace*/ true);
+							if (!Objects.equals(original, updated)) {
+								Files.writeString(p, updated, StandardCharsets.UTF_8);
+								modified.add(p.toString());
+								try {
+									List<String> ensureImports = Collections.emptyList();
+									if (!name.pkg.isEmpty() && !name.pkg.equals(t.packageName)) {
+										ensureImports = Collections.singletonList(name.qualified());
+									}
+									organizeImports(env, p, updated, ensureImports);
+								} catch (Throwable ex) {
+									logger.debug("Import organization skipped for {}: {}", p, String.valueOf(ex.getMessage()));
+								}
+							}
+						}
+						try {
+							List<Path> updatedPoms = ensureModuleDependencies(superFile, targets);
+							for (Path pomPath : updatedPoms) {
+								modified.add(pomPath.toString());
+							}
+						} catch (Exception ex) {
+							logger.warn("Failed to update module dependencies", ex);
+						}
+					}
+				} else {
+					// TWO_OR_MORE_HAVE with different supers: do nothing
+					resultingSuperName = null;
+				}
 			}
 
 			return ExtractSuperclassResult.success()
@@ -251,18 +298,147 @@ public class ExtractSuperclassRefactorer {
 		return a.substring(0, i);
 	}
 
-	private Path ensureSuperclassFile(RefEnv env, NameParts superName, List<TargetType> targets) throws Exception {
-		return ensureSuperclassFileNearType(env, superName, targets != null && !targets.isEmpty() ? targets.get(0) : null);
+	private String findCommonSuperclassQualifiedName(RefEnv env, List<TargetType> targets) {
+		if (targets == null || targets.isEmpty()) {
+			return null;
+		}
+		String common = null;
+		for (TargetType target : targets) {
+			if (target == null || target.typeDecl == null || target.typeDecl.getSuperclassType() == null) {
+				return null;
+			}
+			String identifier = determineSuperclassIdentifier(env, target);
+			if (identifier == null || identifier.isEmpty()) {
+				return null;
+			}
+			if (common == null) {
+				common = identifier;
+			} else if (!common.equals(identifier)) {
+				return null;
+			}
+		}
+		return common;
 	}
 
-	/** Place the new superclass in the same directory as the first target class. */
-	private Path ensureSuperclassFileNearType(RefEnv env, NameParts superName, TargetType anchor) throws Exception {
+	private String determineSuperclassIdentifier(RefEnv env, TargetType target) {
+		String resolved = resolveExistingSuperclassQualifiedName(env, target);
+		if (resolved != null && !resolved.isEmpty()) {
+			return resolved;
+		}
+		Type superType = target.typeDecl.getSuperclassType();
+		if (superType == null) {
+			return null;
+		}
+		String raw = baseTypeName(superType.toString());
+		if (raw == null || raw.isEmpty()) {
+			return null;
+		}
+		String attempt = resolveTypeNameToFqn(env, raw, target.packageName);
+		if (attempt != null && !attempt.isEmpty()) {
+			return attempt;
+		}
+		return raw;
+	}
+
+	private SuperclassPlacement planSuperclassPlacement(RefEnv env, ExtractSuperclassRequest req, NameParts planned) {
+		if (req.absoluteOutputPath() == null || req.absoluteOutputPath().trim().isEmpty()) {
+			return new SuperclassPlacement(planned, null);
+		}
+		Path requested = java.nio.file.Paths.get(req.absoluteOutputPath().trim()).toAbsolutePath().normalize();
+		boolean exists = Files.exists(requested);
+		boolean isDirectory = exists && Files.isDirectory(requested);
+		Path filePath;
+		String simple = planned.simple;
+		if (isDirectory) {
+			filePath = requested.resolve(simple + ".java");
+		} else {
+			filePath = requested;
+			String fileName = filePath.getFileName() != null ? filePath.getFileName().toString() : "";
+			if (fileName.isEmpty()) {
+				fileName = simple + ".java";
+				filePath = filePath.resolve(fileName);
+			}
+			if (!fileName.toLowerCase(Locale.ROOT).endsWith(".java")) {
+				fileName = fileName + ".java";
+				filePath = filePath.resolveSibling(fileName);
+			}
+			String trimmed = fileName.substring(0, Math.max(0, fileName.length() - 5));
+			if (!trimmed.isEmpty()) {
+				simple = trimmed;
+			}
+		}
+		String pkg = planned.pkg == null ? "" : planned.pkg;
+		if (req.superQualifiedName() == null || req.superQualifiedName().isEmpty()) {
+			String inferred = inferPackageFromAbsolutePath(env, filePath.getParent());
+			if (inferred != null) {
+				pkg = inferred;
+			}
+		}
+		NameParts effective = new NameParts(pkg, simple);
+		logger.debug("Planned superclass placement: name={}, path={}", effective.qualified(), filePath);
+		return new SuperclassPlacement(effective, filePath);
+	}
+
+	private String inferPackageFromAbsolutePath(RefEnv env, Path directory) {
+		if (directory == null) {
+			return "";
+		}
+		Path normalized = directory.toAbsolutePath().normalize();
+		for (String sp : env.sourcepaths) {
+			Path root = new File(sp).toPath().toAbsolutePath().normalize();
+			if (normalized.startsWith(root)) {
+				Path relative = root.relativize(normalized);
+				if (relative.getNameCount() == 0) {
+					return "";
+				}
+				StringBuilder builder = new StringBuilder();
+				for (Path part : relative) {
+					if (builder.length() > 0) {
+						builder.append('.');
+					}
+					builder.append(part.toString());
+				}
+				String pkg = builder.toString();
+				logger.debug("Inferred package {} for directory {}", pkg, normalized);
+				return pkg;
+			}
+		}
+		logger.debug("Unable to infer package for {}; falling back to planned value", normalized);
+		return null;
+	}
+
+	private Path ensureSuperclassFile(RefEnv env, SuperclassPlacement placement, TargetType anchor, String extendsQualifiedName) throws Exception {
+		if (placement.explicitPath != null) {
+			return ensureSuperclassFileAtExplicitPath(placement, extendsQualifiedName);
+		}
+		return ensureSuperclassFileNearType(env, placement.name, anchor, extendsQualifiedName);
+	}
+
+	private Path ensureSuperclassFileAtExplicitPath(SuperclassPlacement placement, String extendsQualifiedName) throws Exception {
+		Path file = placement.explicitPath;
+		Path parent = file.getParent();
+		if (parent == null) {
+			throw new IllegalArgumentException("absolute_output_path must include a directory where the superclass can be created");
+		}
+		Files.createDirectories(parent);
+		if (!Files.exists(file)) {
+			String content = renderAbstractSuperclass(placement.name, extendsQualifiedName);
+			Files.writeString(file, content, StandardCharsets.UTF_8);
+			logger.info("Created superclass file at explicit path: {}", file);
+		} else {
+			logger.info("Superclass already exists at explicit path: {}", file);
+		}
+		return file;
+	}
+
+	/** Place the new superclass in the same directory as the first target class when no explicit path is provided. */
+	private Path ensureSuperclassFileNearType(RefEnv env, NameParts superName, TargetType anchor, String extendsQualifiedName) throws Exception {
 		Path pkgDir = env.resolvePackageDir(superName.pkg, anchor);
 		logger.info("Resolved superclass directory for {} to {}", superName.qualified(), pkgDir);
 		Files.createDirectories(pkgDir);
 		Path file = pkgDir.resolve(superName.simple + ".java");
 		if (!Files.exists(file)) {
-			String content = renderAbstractSuperclass(superName, java.util.Collections.emptyList());
+			String content = renderAbstractSuperclass(superName, extendsQualifiedName);
 			Files.writeString(file, content, StandardCharsets.UTF_8);
 			logger.info("Created superclass file: {}", file);
 		} else {
@@ -276,9 +452,12 @@ public class ExtractSuperclassRefactorer {
 		try { return new java.io.File(".").getCanonicalPath(); } catch (Exception e) { return new java.io.File(".").getAbsolutePath(); }
 	}
 
-	private String renderAbstractSuperclass(NameParts name, List<TargetType> targets) {
+	private String renderAbstractSuperclass(NameParts name, String extendsQualifiedName) {
 		String pkgLine = name.pkg.isEmpty() ? "" : ("package " + name.pkg + ";\n\n");
-		return pkgLine + "public abstract class " + name.simple + " {\n}\n";
+		String extendsClause = (extendsQualifiedName != null && !extendsQualifiedName.isEmpty())
+			? " extends " + extendsQualifiedName
+			: "";
+		return pkgLine + "public abstract class " + name.simple + extendsClause + " {\n}\n";
 	}
 
 	private List<Path> ensureModuleDependencies(Path superFile, List<TargetType> targets) throws Exception {
@@ -727,6 +906,15 @@ public class ExtractSuperclassRefactorer {
 	private static final class SuperSituation {
 		final SuperSituationKind kind; final TargetType oneWith;
 		SuperSituation(SuperSituationKind k, TargetType o) { this.kind=k; this.oneWith=o; }
+	}
+
+	private static final class SuperclassPlacement {
+		final NameParts name;
+		final Path explicitPath;
+		SuperclassPlacement(NameParts name, Path explicitPath) {
+			this.name = name;
+			this.explicitPath = explicitPath == null ? null : explicitPath.toAbsolutePath().normalize();
+		}
 	}
 
 	private SuperSituation analyzeSuperSituation(List<TargetType> targets) {

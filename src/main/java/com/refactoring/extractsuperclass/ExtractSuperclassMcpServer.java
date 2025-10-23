@@ -107,6 +107,7 @@ public class ExtractSuperclassMcpServer {
 		ArrayNode required = objectMapper.createArrayNode();
 		required.add("projectRoot");
 		required.add("classNames");
+		required.add("absoluteOutputPath");
 		inputSchema.set("required", required);
 
 		ObjectNode properties = objectMapper.createObjectNode();
@@ -130,6 +131,8 @@ public class ExtractSuperclassMcpServer {
 
 		properties.set("superQualifiedName", createStringProperty("Optional fully qualified name for the new superclass.", false));
 		properties.set("superName", createStringProperty("Alias for superQualifiedName to match CLI arguments.", false));
+		properties.set("absoluteOutputPath", createStringProperty("Absolute directory or file path for the generated superclass.", true));
+		properties.set("absolute_output_path", createStringProperty("Alias for absoluteOutputPath to match snake_case arguments.", true));
 
 		inputSchema.set("properties", properties);
 		tool.set("inputSchema", inputSchema);
@@ -175,6 +178,15 @@ public class ExtractSuperclassMcpServer {
 			superQualifiedName = optionalText(arguments, "superName");
 		}
 
+		String absoluteOutputPath = optionalText(arguments, "absoluteOutputPath");
+		if (absoluteOutputPath == null) {
+			absoluteOutputPath = optionalText(arguments, "absolute_output_path");
+		}
+		if (absoluteOutputPath == null || absoluteOutputPath.trim().isEmpty()) {
+			return createErrorResponse(id, -32602, "Invalid parameters", "Missing required parameter: absoluteOutputPath");
+		}
+		absoluteOutputPath = absoluteOutputPath.trim();
+
 		boolean dryRun = arguments.path("dryRun").asBoolean(false);
 		boolean verbose = arguments.path("verbose").asBoolean(false);
 
@@ -200,10 +212,11 @@ public class ExtractSuperclassMcpServer {
 		}
 
 		logger.info(
-			"Executing extract_superclass: projectRoots={}, classNames={}, superQualifiedName={}, dryRun={}, verbose={}",
+			"Executing extract_superclass: projectRoots={}, classNames={}, superQualifiedName={}, absoluteOutputPath={}, dryRun={}, verbose={}",
 			projectRoots,
 			classNames,
 			superQualifiedName,
+			absoluteOutputPath,
 			dryRun,
 			verbose
 		);
@@ -214,7 +227,7 @@ public class ExtractSuperclassMcpServer {
 			ExtractSuperclassRequest request = new ExtractSuperclassRequest(
 				classNames,
 				superQualifiedName,
-				null,
+				absoluteOutputPath,
 				dryRun,
 				verbose
 			);

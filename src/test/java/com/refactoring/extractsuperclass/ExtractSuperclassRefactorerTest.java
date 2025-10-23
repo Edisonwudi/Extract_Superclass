@@ -28,14 +28,15 @@ public class ExtractSuperclassRefactorerTest {
 		Files.writeString(aFile, aSrc, StandardCharsets.UTF_8);
 		Files.writeString(bFile, bSrc, StandardCharsets.UTF_8);
 
-		ExtractSuperclassRefactorer ref = new ExtractSuperclassRefactorer(Arrays.asList(src.toFile()));
-		ExtractSuperclassRequest req = new ExtractSuperclassRequest(
-			Arrays.asList("com.example.ProcessorA", "com.example.ProcessorB"),
-			null,
-			"com.example",
-			false,
-			true
-		);
+        ExtractSuperclassRefactorer ref = new ExtractSuperclassRefactorer(Arrays.asList(src.toFile()));
+        Path superOut = pkgDir.resolve("AbstractP.java");
+        ExtractSuperclassRequest req = new ExtractSuperclassRequest(
+            Arrays.asList("com.example.ProcessorA", "com.example.ProcessorB"),
+            null,
+            superOut.toString(),
+            false,
+            true
+        );
 		ExtractSuperclassResult res = ref.performRefactoring(req);
 		assertTrue(res.isSuccess(), () -> "refactoring failed: " + res.getErrorMessage());
 		assertNotNull(res.getSuperclassQualifiedName());
@@ -71,10 +72,11 @@ public class ExtractSuperclassRefactorerTest {
         Files.writeString(bFile, bSrc, StandardCharsets.UTF_8);
 
         ExtractSuperclassRefactorer ref = new ExtractSuperclassRefactorer(Arrays.asList(src.toFile()));
+        Path superOut = pkgDir.resolve("AbstractBase.java");
         ExtractSuperclassRequest req = new ExtractSuperclassRequest(
                 Arrays.asList("com.example.A", "com.example.B"),
                 null,
-                "com.example",
+                superOut.toString(),
                 false,
                 true
         );
@@ -103,10 +105,11 @@ public class ExtractSuperclassRefactorerTest {
         Files.writeString(bFile, bSrc, StandardCharsets.UTF_8);
 
         ExtractSuperclassRefactorer ref = new ExtractSuperclassRefactorer(Arrays.asList(src.toFile()));
+        Path superOut = pkgDir.resolve("AbstractBase.java");
         ExtractSuperclassRequest req = new ExtractSuperclassRequest(
                 Arrays.asList("com.example.A", "com.example.B"),
                 null,
-                "com.example",
+                superOut.toString(),
                 false,
                 true
         );
@@ -144,10 +147,11 @@ public class ExtractSuperclassRefactorerTest {
         Files.writeString(editorFile, editorSrc, StandardCharsets.UTF_8);
 
         ExtractSuperclassRefactorer ref = new ExtractSuperclassRefactorer(Arrays.asList(src.toFile()));
+        Path superOut = pkgDir.resolve("AbstractGuiBase.java");
         ExtractSuperclassRequest req = new ExtractSuperclassRequest(
             Arrays.asList("com.example.gui.DefaultDrawingView", "com.example.gui.DrawingEditor"),
             null,
-            "com.example.gui",
+            superOut.toString(),
             false,
             true
         );
@@ -160,5 +164,100 @@ public class ExtractSuperclassRefactorerTest {
         assertTrue(editorAfter.contains("extends JComponent"), "New subclass missing extends clause");
         assertTrue(editorAfter.contains("import javax.swing.JComponent;"), "Missing import for external superclass");
         assertFalse(editorAfter.contains("extends javax.swing.JComponent"), "Should rely on import for external superclass");
+    }
+
+    @Test
+    public void placesSuperclassAtExplicitAbsolutePath(@TempDir Path tmp) throws Exception {
+        Path src = tmp.resolve("src");
+        Files.createDirectories(src);
+
+        Path serviceDir = src.resolve("com/example/service");
+        Files.createDirectories(serviceDir);
+        Path sharedDir = src.resolve("com/example/shared/base");
+        Files.createDirectories(sharedDir);
+
+        Path alphaFile = serviceDir.resolve("AlphaService.java");
+        Path betaFile = serviceDir.resolve("BetaService.java");
+        Files.writeString(alphaFile, "package com.example.service;\n\npublic class AlphaService { }\n", StandardCharsets.UTF_8);
+        Files.writeString(betaFile, "package com.example.service;\n\npublic class BetaService { }\n", StandardCharsets.UTF_8);
+
+        Path explicitFile = sharedDir.resolve("CentralBase.java");
+
+        ExtractSuperclassRefactorer ref = new ExtractSuperclassRefactorer(Arrays.asList(src.toFile()));
+        ExtractSuperclassRequest req = new ExtractSuperclassRequest(
+                Arrays.asList("com.example.service.AlphaService", "com.example.service.BetaService"),
+                null,
+                explicitFile.toString(),
+                false,
+                false
+        );
+
+        ExtractSuperclassResult res = ref.performRefactoring(req);
+        assertTrue(res.isSuccess(), () -> "refactoring failed: " + res.getErrorMessage());
+        assertEquals("com.example.shared.base.CentralBase", res.getSuperclassQualifiedName());
+
+        assertTrue(Files.exists(explicitFile), "Expected superclass file at explicit path");
+        String superContent = Files.readString(explicitFile, StandardCharsets.UTF_8);
+        assertTrue(superContent.contains("package com.example.shared.base;"), "Superclass package not aligned with explicit path");
+
+        String alphaAfter = Files.readString(alphaFile, StandardCharsets.UTF_8);
+        String betaAfter = Files.readString(betaFile, StandardCharsets.UTF_8);
+        boolean alphaSimple = alphaAfter.contains("extends CentralBase");
+        boolean alphaFqn = alphaAfter.contains("extends com.example.shared.base.CentralBase");
+        boolean betaSimple = betaAfter.contains("extends CentralBase");
+        boolean betaFqn = betaAfter.contains("extends com.example.shared.base.CentralBase");
+        assertTrue(alphaSimple || alphaFqn, "AlphaService should extend the new superclass");
+        assertTrue(betaSimple || betaFqn, "BetaService should extend the new superclass");
+        if (alphaSimple) {
+            assertTrue(alphaAfter.contains("import com.example.shared.base.CentralBase;"), "AlphaService should import the explicit superclass when using simple extends");
+        }
+        if (betaSimple) {
+            assertTrue(betaAfter.contains("import com.example.shared.base.CentralBase;"), "BetaService should import the explicit superclass when using simple extends");
+        }
+    }
+
+    @Test
+    public void sharedSuperclass_createsIntermediateSuperclass(@TempDir Path tmp) throws Exception {
+        Path src = tmp.resolve("src");
+        Files.createDirectories(src);
+
+        Path pkgDir = src.resolve("com/example");
+        Files.createDirectories(pkgDir);
+
+        Files.writeString(pkgDir.resolve("ExistingBase.java"), "package com.example;\n\npublic class ExistingBase { }\n", StandardCharsets.UTF_8);
+        Path aFile = pkgDir.resolve("Alpha.java");
+        Path bFile = pkgDir.resolve("Beta.java");
+        Files.writeString(aFile, "package com.example;\n\npublic class Alpha extends ExistingBase { }\n", StandardCharsets.UTF_8);
+        Files.writeString(bFile, "package com.example;\n\npublic class Beta extends ExistingBase { }\n", StandardCharsets.UTF_8);
+
+        ExtractSuperclassRefactorer ref = new ExtractSuperclassRefactorer(Arrays.asList(src.toFile()));
+        Path intendedSuper = pkgDir.resolve("AbstractBase.java");
+        ExtractSuperclassRequest req = new ExtractSuperclassRequest(
+                Arrays.asList("com.example.Alpha", "com.example.Beta"),
+                null,
+                intendedSuper.toString(),
+                false,
+                false
+        );
+
+        ExtractSuperclassResult res = ref.performRefactoring(req);
+        assertTrue(res.isSuccess(), () -> "refactoring failed: " + res.getErrorMessage());
+        String newSuperFqn = res.getSuperclassQualifiedName();
+        assertNotNull(newSuperFqn, "Expected intermediate superclass to be created");
+
+        String newSuperSimple = newSuperFqn.substring(newSuperFqn.lastIndexOf('.') + 1);
+        Path newSuperFile = pkgDir.resolve(newSuperSimple + ".java");
+        assertTrue(Files.exists(newSuperFile), "Intermediate superclass file should exist");
+        String superContent = Files.readString(newSuperFile, StandardCharsets.UTF_8);
+        assertTrue(
+                superContent.contains("extends ExistingBase") || superContent.contains("extends com.example.ExistingBase"),
+                "Intermediate superclass should extend the original base");
+
+        String alphaAfter = Files.readString(aFile, StandardCharsets.UTF_8);
+        String betaAfter = Files.readString(bFile, StandardCharsets.UTF_8);
+        assertTrue(alphaAfter.contains("extends " + newSuperSimple), "Alpha should now extend the intermediate superclass");
+        assertTrue(betaAfter.contains("extends " + newSuperSimple), "Beta should now extend the intermediate superclass");
+        assertFalse(alphaAfter.contains("extends ExistingBase"), "Alpha should no longer extend the original base");
+        assertFalse(betaAfter.contains("extends ExistingBase"), "Beta should no longer extend the original base");
     }
 }
