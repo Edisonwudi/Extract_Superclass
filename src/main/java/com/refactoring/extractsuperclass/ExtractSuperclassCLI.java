@@ -48,13 +48,6 @@ public class ExtractSuperclassCLI implements Callable<Integer> {
     private String superQualifiedName;
 
     @Option(
-        names = {"--absoluteOutputPath", "--absolute-output-path"},
-        description = "Absolute directory or file path for the generated superclass",
-        required = true
-    )
-    private String absoluteOutputPath;
-
-    @Option(
         names = {"--dryRun", "-d"},
         description = "Perform analysis without making changes"
     )
@@ -98,17 +91,9 @@ public class ExtractSuperclassCLI implements Callable<Integer> {
                 }
             }
 
-            // Create request
-            if (absoluteOutputPath == null || absoluteOutputPath.trim().isEmpty()) {
-                logger.error("absoluteOutputPath must be provided and cannot be empty");
-                return 1;
-            }
-            absoluteOutputPath = absoluteOutputPath.trim();
-
             ExtractSuperclassRequest request = new ExtractSuperclassRequest(
                 classNamesList,
                 superQualifiedName,
-                absoluteOutputPath,
                 dryRun,
                 verbose
             );

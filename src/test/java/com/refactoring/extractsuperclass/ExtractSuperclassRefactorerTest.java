@@ -29,11 +29,9 @@ public class ExtractSuperclassRefactorerTest {
 		Files.writeString(bFile, bSrc, StandardCharsets.UTF_8);
 
         ExtractSuperclassRefactorer ref = new ExtractSuperclassRefactorer(Arrays.asList(src.toFile()));
-        Path superOut = pkgDir.resolve("AbstractP.java");
         ExtractSuperclassRequest req = new ExtractSuperclassRequest(
             Arrays.asList("com.example.ProcessorA", "com.example.ProcessorB"),
             null,
-            superOut.toString(),
             false,
             true
         );
@@ -72,11 +70,9 @@ public class ExtractSuperclassRefactorerTest {
         Files.writeString(bFile, bSrc, StandardCharsets.UTF_8);
 
         ExtractSuperclassRefactorer ref = new ExtractSuperclassRefactorer(Arrays.asList(src.toFile()));
-        Path superOut = pkgDir.resolve("AbstractBase.java");
         ExtractSuperclassRequest req = new ExtractSuperclassRequest(
                 Arrays.asList("com.example.A", "com.example.B"),
                 null,
-                superOut.toString(),
                 false,
                 true
         );
@@ -105,11 +101,9 @@ public class ExtractSuperclassRefactorerTest {
         Files.writeString(bFile, bSrc, StandardCharsets.UTF_8);
 
         ExtractSuperclassRefactorer ref = new ExtractSuperclassRefactorer(Arrays.asList(src.toFile()));
-        Path superOut = pkgDir.resolve("AbstractBase.java");
         ExtractSuperclassRequest req = new ExtractSuperclassRequest(
                 Arrays.asList("com.example.A", "com.example.B"),
                 null,
-                superOut.toString(),
                 false,
                 true
         );
@@ -147,11 +141,9 @@ public class ExtractSuperclassRefactorerTest {
         Files.writeString(editorFile, editorSrc, StandardCharsets.UTF_8);
 
         ExtractSuperclassRefactorer ref = new ExtractSuperclassRefactorer(Arrays.asList(src.toFile()));
-        Path superOut = pkgDir.resolve("AbstractGuiBase.java");
         ExtractSuperclassRequest req = new ExtractSuperclassRequest(
             Arrays.asList("com.example.gui.DefaultDrawingView", "com.example.gui.DrawingEditor"),
             null,
-            superOut.toString(),
             false,
             true
         );
@@ -164,56 +156,6 @@ public class ExtractSuperclassRefactorerTest {
         assertTrue(editorAfter.contains("extends JComponent"), "New subclass missing extends clause");
         assertTrue(editorAfter.contains("import javax.swing.JComponent;"), "Missing import for external superclass");
         assertFalse(editorAfter.contains("extends javax.swing.JComponent"), "Should rely on import for external superclass");
-    }
-
-    @Test
-    public void placesSuperclassAtExplicitAbsolutePath(@TempDir Path tmp) throws Exception {
-        Path src = tmp.resolve("src");
-        Files.createDirectories(src);
-
-        Path serviceDir = src.resolve("com/example/service");
-        Files.createDirectories(serviceDir);
-        Path sharedDir = src.resolve("com/example/shared/base");
-        Files.createDirectories(sharedDir);
-
-        Path alphaFile = serviceDir.resolve("AlphaService.java");
-        Path betaFile = serviceDir.resolve("BetaService.java");
-        Files.writeString(alphaFile, "package com.example.service;\n\npublic class AlphaService { }\n", StandardCharsets.UTF_8);
-        Files.writeString(betaFile, "package com.example.service;\n\npublic class BetaService { }\n", StandardCharsets.UTF_8);
-
-        Path explicitFile = sharedDir.resolve("CentralBase.java");
-
-        ExtractSuperclassRefactorer ref = new ExtractSuperclassRefactorer(Arrays.asList(src.toFile()));
-        ExtractSuperclassRequest req = new ExtractSuperclassRequest(
-                Arrays.asList("com.example.service.AlphaService", "com.example.service.BetaService"),
-                null,
-                explicitFile.toString(),
-                false,
-                false
-        );
-
-        ExtractSuperclassResult res = ref.performRefactoring(req);
-        assertTrue(res.isSuccess(), () -> "refactoring failed: " + res.getErrorMessage());
-        assertEquals("com.example.shared.base.CentralBase", res.getSuperclassQualifiedName());
-
-        assertTrue(Files.exists(explicitFile), "Expected superclass file at explicit path");
-        String superContent = Files.readString(explicitFile, StandardCharsets.UTF_8);
-        assertTrue(superContent.contains("package com.example.shared.base;"), "Superclass package not aligned with explicit path");
-
-        String alphaAfter = Files.readString(alphaFile, StandardCharsets.UTF_8);
-        String betaAfter = Files.readString(betaFile, StandardCharsets.UTF_8);
-        boolean alphaSimple = alphaAfter.contains("extends CentralBase");
-        boolean alphaFqn = alphaAfter.contains("extends com.example.shared.base.CentralBase");
-        boolean betaSimple = betaAfter.contains("extends CentralBase");
-        boolean betaFqn = betaAfter.contains("extends com.example.shared.base.CentralBase");
-        assertTrue(alphaSimple || alphaFqn, "AlphaService should extend the new superclass");
-        assertTrue(betaSimple || betaFqn, "BetaService should extend the new superclass");
-        if (alphaSimple) {
-            assertTrue(alphaAfter.contains("import com.example.shared.base.CentralBase;"), "AlphaService should import the explicit superclass when using simple extends");
-        }
-        if (betaSimple) {
-            assertTrue(betaAfter.contains("import com.example.shared.base.CentralBase;"), "BetaService should import the explicit superclass when using simple extends");
-        }
     }
 
     @Test
@@ -231,11 +173,9 @@ public class ExtractSuperclassRefactorerTest {
         Files.writeString(bFile, "package com.example;\n\npublic class Beta extends ExistingBase { }\n", StandardCharsets.UTF_8);
 
         ExtractSuperclassRefactorer ref = new ExtractSuperclassRefactorer(Arrays.asList(src.toFile()));
-        Path intendedSuper = pkgDir.resolve("AbstractBase.java");
         ExtractSuperclassRequest req = new ExtractSuperclassRequest(
                 Arrays.asList("com.example.Alpha", "com.example.Beta"),
                 null,
-                intendedSuper.toString(),
                 false,
                 false
         );
@@ -259,5 +199,146 @@ public class ExtractSuperclassRefactorerTest {
         assertTrue(betaAfter.contains("extends " + newSuperSimple), "Beta should now extend the intermediate superclass");
         assertFalse(alphaAfter.contains("extends ExistingBase"), "Alpha should no longer extend the original base");
         assertFalse(betaAfter.contains("extends ExistingBase"), "Beta should no longer extend the original base");
+    }
+
+    @Test
+    public void autoPlacementChoosesUpstreamModule(@TempDir Path tmp) throws Exception {
+        Path projectRoot = tmp.resolve("project");
+        Path moduleA = projectRoot.resolve("module-a");
+        Path moduleB = projectRoot.resolve("module-b");
+        Files.createDirectories(moduleA.resolve("src/main/java/com/example/app"));
+        Files.createDirectories(moduleB.resolve("src/main/java/com/example/shared"));
+
+        String moduleBPom = "<project xmlns=\"http://maven.apache.org/POM/4.0.0\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\""
+            + " xsi:schemaLocation=\"http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd\">"
+            + "<modelVersion>4.0.0</modelVersion>"
+            + "<groupId>com.example</groupId>"
+            + "<artifactId>module-b</artifactId>"
+            + "<version>1.0.0</version>"
+            + "<packaging>jar</packaging>"
+            + "</project>";
+        Files.writeString(moduleB.resolve("pom.xml"), moduleBPom, StandardCharsets.UTF_8);
+
+        String moduleAPom = "<project xmlns=\"http://maven.apache.org/POM/4.0.0\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\""
+            + " xsi:schemaLocation=\"http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd\">"
+            + "<modelVersion>4.0.0</modelVersion>"
+            + "<groupId>com.example</groupId>"
+            + "<artifactId>module-a</artifactId>"
+            + "<version>1.0.0</version>"
+            + "<packaging>jar</packaging>"
+            + "<dependencies>"
+            + "  <dependency><groupId>com.example</groupId><artifactId>module-b</artifactId><version>1.0.0</version></dependency>"
+            + "</dependencies>"
+            + "</project>";
+        Files.writeString(moduleA.resolve("pom.xml"), moduleAPom, StandardCharsets.UTF_8);
+
+        Path serviceOneFile = moduleA.resolve("src/main/java/com/example/app/ServiceOne.java");
+        Path serviceTwoFile = moduleB.resolve("src/main/java/com/example/shared/ServiceTwo.java");
+        Files.writeString(serviceOneFile, "package com.example.app;\n\npublic class ServiceOne { }\n", StandardCharsets.UTF_8);
+        Files.writeString(serviceTwoFile, "package com.example.shared;\n\npublic class ServiceTwo { }\n", StandardCharsets.UTF_8);
+
+        ExtractSuperclassRefactorer refactorer = new ExtractSuperclassRefactorer(Arrays.asList(projectRoot.toFile()));
+        ExtractSuperclassRequest request = new ExtractSuperclassRequest(
+                Arrays.asList("com.example.app.ServiceOne", "com.example.shared.ServiceTwo"),
+                null,
+                false,
+                false
+        );
+
+        ExtractSuperclassResult result = refactorer.performRefactoring(request);
+        assertTrue(result.isSuccess(), () -> "Refactoring failed: " + result.getErrorMessage());
+        String superFqn = result.getSuperclassQualifiedName();
+        assertNotNull(superFqn, "Superclass FQN should be reported");
+        assertTrue(superFqn.startsWith("com.example.app."), "Superclass should live in app package");
+        String superSimple = superFqn.substring(superFqn.lastIndexOf('.') + 1);
+        assertTrue(superSimple.startsWith("Abstract"), "Superclass simple name should start with Abstract");
+
+        Path expectedSuper = moduleB.resolve("src/main/java").resolve(superFqn.replace('.', File.separatorChar) + ".java");
+        assertTrue(Files.exists(expectedSuper), "Superclass should be created in downstream module");
+
+        String aAfter = Files.readString(serviceOneFile, StandardCharsets.UTF_8);
+        String bAfter = Files.readString(serviceTwoFile, StandardCharsets.UTF_8);
+        assertTrue(aAfter.contains("extends " + superFqn) || aAfter.contains("extends " + superSimple));
+        assertTrue(bAfter.contains("extends " + superFqn) || bAfter.contains("extends " + superSimple));
+
+        assertNotNull(result.getModifiedFiles());
+        assertFalse(result.getModifiedFiles().stream().anyMatch(path -> path.endsWith("module-a" + File.separator + "pom.xml")),
+                "module-a pom should not require extra dependency when superclass is placed downstream");
+        assertFalse(result.getModifiedFiles().stream().anyMatch(path -> path.endsWith("module-b" + File.separator + "pom.xml")),
+                "module-b pom should remain untouched when chosen as superclass host");
+    }
+
+    @Test
+    public void skipsAddingDependencyWhenItWouldCreateCycle(@TempDir Path tmp) throws Exception {
+        Path projectRoot = tmp.resolve("workspace");
+        Path moduleA = projectRoot.resolve("module-a");
+        Path moduleB = projectRoot.resolve("module-b");
+        Path moduleC = projectRoot.resolve("module-c");
+
+        Files.createDirectories(moduleA.resolve("src/main/java/com/example/a"));
+        Files.createDirectories(moduleB.resolve("src/main/java/com/example/shared"));
+        Files.createDirectories(moduleC.resolve("src/main/java/com/example/c"));
+
+        String moduleAPom = "<project xmlns=\"http://maven.apache.org/POM/4.0.0\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\""
+            + " xsi:schemaLocation=\"http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd\">"
+            + "<modelVersion>4.0.0</modelVersion>"
+            + "<groupId>com.example</groupId>"
+            + "<artifactId>module-a</artifactId>"
+            + "<version>1.0.0</version>"
+            + "<packaging>jar</packaging>"
+            + "<dependencies>"
+            + "  <dependency><groupId>com.example</groupId><artifactId>module-c</artifactId><version>1.0.0</version></dependency>"
+            + "</dependencies>"
+            + "</project>";
+        Files.writeString(moduleA.resolve("pom.xml"), moduleAPom, StandardCharsets.UTF_8);
+
+        String moduleBPom = "<project xmlns=\"http://maven.apache.org/POM/4.0.0\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\""
+            + " xsi:schemaLocation=\"http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd\">"
+            + "<modelVersion>4.0.0</modelVersion>"
+            + "<groupId>com.example</groupId>"
+            + "<artifactId>module-b</artifactId>"
+            + "<version>1.0.0</version>"
+            + "<packaging>jar</packaging>"
+            + "<dependencies>"
+            + "  <dependency><groupId>com.example</groupId><artifactId>module-a</artifactId><version>1.0.0</version></dependency>"
+            + "</dependencies>"
+            + "</project>";
+        Files.writeString(moduleB.resolve("pom.xml"), moduleBPom, StandardCharsets.UTF_8);
+
+        String moduleCPom = "<project xmlns=\"http://maven.apache.org/POM/4.0.0\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\""
+            + " xsi:schemaLocation=\"http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd\">"
+            + "<modelVersion>4.0.0</modelVersion>"
+            + "<groupId>com.example</groupId>"
+            + "<artifactId>module-c</artifactId>"
+            + "<version>1.0.0</version>"
+            + "<packaging>jar</packaging>"
+            + "<dependencies>"
+            + "  <dependency><groupId>com.example</groupId><artifactId>module-b</artifactId><version>1.0.0</version></dependency>"
+            + "</dependencies>"
+            + "</project>";
+        Files.writeString(moduleC.resolve("pom.xml"), moduleCPom, StandardCharsets.UTF_8);
+
+        Path classA = moduleA.resolve("src/main/java/com/example/a/ClassA.java");
+        Path classC = moduleC.resolve("src/main/java/com/example/c/ClassC.java");
+        Files.writeString(classA, "package com.example.a;\n\npublic class ClassA { }\n", StandardCharsets.UTF_8);
+        Files.writeString(classC, "package com.example.c;\n\npublic class ClassC { }\n", StandardCharsets.UTF_8);
+
+        ExtractSuperclassRefactorer refactorer = new ExtractSuperclassRefactorer(Arrays.asList(projectRoot.toFile()));
+        ExtractSuperclassRequest request = new ExtractSuperclassRequest(
+                Arrays.asList("com.example.a.ClassA", "com.example.c.ClassC"),
+                null,
+                false,
+                false
+        );
+
+        ExtractSuperclassResult result = refactorer.performRefactoring(request);
+        assertTrue(result.isSuccess(), () -> "Refactoring failed: " + result.getErrorMessage());
+
+        String updatedModuleCPom = Files.readString(moduleC.resolve("pom.xml"), StandardCharsets.UTF_8);
+        assertFalse(updatedModuleCPom.contains("<artifactId>module-a</artifactId>"),
+                "module-c pom must not gain dependency on module-a because it would form a cycle");
+
+        assertFalse(result.getModifiedFiles().stream().anyMatch(path -> path.endsWith("module-c" + File.separator + "pom.xml")),
+                "Dependency update for module-c should be skipped due to cycle risk");
     }
 }

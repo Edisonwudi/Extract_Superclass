@@ -8,22 +8,9 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.File;
-import java.io.StringWriter;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
-
-import javax.xml.parsers.DocumentBuilder;
-import javax.xml.parsers.DocumentBuilderFactory;
-import javax.xml.transform.OutputKeys;
-import javax.xml.transform.Transformer;
-import javax.xml.transform.TransformerFactory;
-import javax.xml.transform.dom.DOMSource;
-import javax.xml.transform.stream.StreamResult;
-
-import org.w3c.dom.Element;
-import org.w3c.dom.Node;
-import org.w3c.dom.NodeList;
 
 import java.util.*;
 import java.util.stream.Collectors;
@@ -33,9 +20,11 @@ public class ExtractSuperclassRefactorer {
 	private static final Logger logger = LoggerFactory.getLogger(ExtractSuperclassRefactorer.class);
 
 	private final List<File> projectRoots;
+	private final ModuleDependencyManager moduleDependencyManager;
 
 	public ExtractSuperclassRefactorer(List<File> projectRoots) {
 		this.projectRoots = new ArrayList<>(projectRoots);
+		this.moduleDependencyManager = new ModuleDependencyManager(this.projectRoots, logger);
 	}
 
 	public ExtractSuperclassResult performRefactoring(ExtractSuperclassRequest request) {
@@ -60,7 +49,8 @@ public class ExtractSuperclassRefactorer {
 				if (plannedName.simple == null || plannedName.simple.isEmpty()) {
 					return ExtractSuperclassResult.failure("Invalid superclass name plan").executionTimeMs(elapsed(start)).build();
 				}
-				SuperclassPlacement placement = planSuperclassPlacement(env, request, plannedName);
+				boolean allowPackageInference = request.superQualifiedName() == null || request.superQualifiedName().isEmpty();
+				SuperclassPlacement placement = moduleDependencyManager.planSuperclassPlacement(env, plannedName, targets, allowPackageInference);
 				NameParts name = placement.name;
 				resultingSuperName = name.qualified();
 				Path superFile = null;
@@ -79,13 +69,13 @@ public class ExtractSuperclassRefactorer {
 						}
 					}
 					try {
-						List<Path> updatedPoms = ensureModuleDependencies(superFile, targets);
+						List<Path> updatedPoms = moduleDependencyManager.ensureModuleDependencies(superFile, targets);
 						for (Path pomPath : updatedPoms) {
 							modified.add(pomPath.toString());
 						}
 					} catch (Exception ex) {
 						logger.warn("Failed to update module dependencies", ex);
-				}
+					}
 				}
 			} else if (situation.kind == SuperSituationKind.EXACTLY_ONE_HAS) {
 				// Do not create a new class; make those without extends directly extend the superclass of the one that has it
@@ -138,7 +128,8 @@ public class ExtractSuperclassRefactorer {
 					if (plannedName.simple == null || plannedName.simple.isEmpty()) {
 						return ExtractSuperclassResult.failure("Invalid superclass name plan").executionTimeMs(elapsed(start)).build();
 					}
-					SuperclassPlacement placement = planSuperclassPlacement(env, request, plannedName);
+					boolean allowPackageInference = request.superQualifiedName() == null || request.superQualifiedName().isEmpty();
+					SuperclassPlacement placement = moduleDependencyManager.planSuperclassPlacement(env, plannedName, targets, allowPackageInference);
 					NameParts name = placement.name;
 					resultingSuperName = name.qualified();
 					Path superFile = null;
@@ -167,7 +158,7 @@ public class ExtractSuperclassRefactorer {
 							}
 						}
 						try {
-							List<Path> updatedPoms = ensureModuleDependencies(superFile, targets);
+							List<Path> updatedPoms = moduleDependencyManager.ensureModuleDependencies(superFile, targets);
 							for (Path pomPath : updatedPoms) {
 								modified.add(pomPath.toString());
 							}
@@ -340,73 +331,6 @@ public class ExtractSuperclassRefactorer {
 		return raw;
 	}
 
-	private SuperclassPlacement planSuperclassPlacement(RefEnv env, ExtractSuperclassRequest req, NameParts planned) {
-		if (req.absoluteOutputPath() == null || req.absoluteOutputPath().trim().isEmpty()) {
-			return new SuperclassPlacement(planned, null);
-		}
-		Path requested = java.nio.file.Paths.get(req.absoluteOutputPath().trim()).toAbsolutePath().normalize();
-		boolean exists = Files.exists(requested);
-		boolean isDirectory = exists && Files.isDirectory(requested);
-		Path filePath;
-		String simple = planned.simple;
-		if (isDirectory) {
-			filePath = requested.resolve(simple + ".java");
-		} else {
-			filePath = requested;
-			String fileName = filePath.getFileName() != null ? filePath.getFileName().toString() : "";
-			if (fileName.isEmpty()) {
-				fileName = simple + ".java";
-				filePath = filePath.resolve(fileName);
-			}
-			if (!fileName.toLowerCase(Locale.ROOT).endsWith(".java")) {
-				fileName = fileName + ".java";
-				filePath = filePath.resolveSibling(fileName);
-			}
-			String trimmed = fileName.substring(0, Math.max(0, fileName.length() - 5));
-			if (!trimmed.isEmpty()) {
-				simple = trimmed;
-			}
-		}
-		String pkg = planned.pkg == null ? "" : planned.pkg;
-		if (req.superQualifiedName() == null || req.superQualifiedName().isEmpty()) {
-			String inferred = inferPackageFromAbsolutePath(env, filePath.getParent());
-			if (inferred != null) {
-				pkg = inferred;
-			}
-		}
-		NameParts effective = new NameParts(pkg, simple);
-		logger.debug("Planned superclass placement: name={}, path={}", effective.qualified(), filePath);
-		return new SuperclassPlacement(effective, filePath);
-	}
-
-	private String inferPackageFromAbsolutePath(RefEnv env, Path directory) {
-		if (directory == null) {
-			return "";
-		}
-		Path normalized = directory.toAbsolutePath().normalize();
-		for (String sp : env.sourcepaths) {
-			Path root = new File(sp).toPath().toAbsolutePath().normalize();
-			if (normalized.startsWith(root)) {
-				Path relative = root.relativize(normalized);
-				if (relative.getNameCount() == 0) {
-					return "";
-				}
-				StringBuilder builder = new StringBuilder();
-				for (Path part : relative) {
-					if (builder.length() > 0) {
-						builder.append('.');
-					}
-					builder.append(part.toString());
-				}
-				String pkg = builder.toString();
-				logger.debug("Inferred package {} for directory {}", pkg, normalized);
-				return pkg;
-			}
-		}
-		logger.debug("Unable to infer package for {}; falling back to planned value", normalized);
-		return null;
-	}
-
 	private Path ensureSuperclassFile(RefEnv env, SuperclassPlacement placement, TargetType anchor, String extendsQualifiedName) throws Exception {
 		if (placement.explicitPath != null) {
 			return ensureSuperclassFileAtExplicitPath(placement, extendsQualifiedName);
@@ -418,7 +342,7 @@ public class ExtractSuperclassRefactorer {
 		Path file = placement.explicitPath;
 		Path parent = file.getParent();
 		if (parent == null) {
-			throw new IllegalArgumentException("absolute_output_path must include a directory where the superclass can be created");
+			throw new IllegalArgumentException("Requested superclass location must include a directory where the superclass can be created");
 		}
 		Files.createDirectories(parent);
 		if (!Files.exists(file)) {
@@ -458,191 +382,6 @@ public class ExtractSuperclassRefactorer {
 			? " extends " + extendsQualifiedName
 			: "";
 		return pkgLine + "public abstract class " + name.simple + extendsClause + " {\n}\n";
-	}
-
-	private List<Path> ensureModuleDependencies(Path superFile, List<TargetType> targets) throws Exception {
-		if (superFile == null) return Collections.emptyList();
-		Path superModule = findModuleRoot(superFile);
-		if (superModule == null) {
-			logger.debug("No module root resolved for superclass file {}", superFile);
-			return Collections.emptyList();
-		}
-		Path superPomPath = superModule.resolve("pom.xml");
-		PomInfo superPom;
-		try {
-			superPom = loadPom(superPomPath);
-		} catch (Exception ex) {
-			logger.warn("Failed to read anchor module pom {}", superPomPath, ex);
-			return Collections.emptyList();
-		}
-		if (superPom.groupId == null || superPom.groupId.isEmpty() || superPom.artifactId == null || superPom.artifactId.isEmpty()) {
-			logger.warn("Anchor module pom {} is missing groupId or artifactId; skipping dependency update", superPomPath);
-			return Collections.emptyList();
-		}
-		Set<Path> targetModules = new LinkedHashSet<>();
-		for (TargetType target : targets) {
-			Path moduleRoot = findModuleRoot(target.filePath);
-			if (moduleRoot == null || moduleRoot.equals(superModule)) continue;
-			targetModules.add(moduleRoot);
-		}
-		List<Path> changed = new ArrayList<>();
-		for (Path moduleRoot : targetModules) {
-			Path pomPath = moduleRoot.resolve("pom.xml");
-			PomInfo targetPom;
-			try {
-				targetPom = loadPom(pomPath);
-			} catch (Exception ex) {
-				logger.warn("Failed to read pom {} while adding superclass dependency", pomPath, ex);
-				continue;
-			}
-			if (addDependencyIfMissing(targetPom, superPom)) {
-				writePom(targetPom);
-				changed.add(pomPath);
-			}
-		}
-		return changed;
-	}
-
-	private Path findModuleRoot(Path file) {
-		if (file == null) return null;
-		Path current = file.toAbsolutePath().normalize();
-		if (!Files.isDirectory(current)) {
-			current = current.getParent();
-		}
-		while (current != null) {
-			if (Files.exists(current.resolve("pom.xml"))) {
-				return current;
-			}
-			current = current.getParent();
-		}
-		return null;
-	}
-
-	private PomInfo loadPom(Path pomPath) throws Exception {
-		if (!Files.exists(pomPath)) {
-			throw new IllegalArgumentException("Missing pom.xml at " + pomPath);
-		}
-		DocumentBuilderFactory factory = DocumentBuilderFactory.newInstance();
-		factory.setNamespaceAware(true);
-		DocumentBuilder builder = factory.newDocumentBuilder();
-		org.w3c.dom.Document document = builder.parse(pomPath.toFile());
-		document.getDocumentElement().normalize();
-		Element projectElement = document.getDocumentElement();
-		String groupId = textOfDirectChild(projectElement, "groupId");
-		String artifactId = textOfDirectChild(projectElement, "artifactId");
-		String version = textOfDirectChild(projectElement, "version");
-		Element parentElement = findDirectChild(projectElement, "parent");
-		if ((groupId == null || groupId.isEmpty()) && parentElement != null) {
-			groupId = textOfDirectChild(parentElement, "groupId");
-		}
-		if ((version == null || version.isEmpty()) && parentElement != null) {
-			version = textOfDirectChild(parentElement, "version");
-		}
-		return new PomInfo(pomPath, document, projectElement, groupId, artifactId, version);
-	}
-
-	private boolean addDependencyIfMissing(PomInfo targetPom, PomInfo dependencyPom) {
-		if (dependencyPom.groupId == null || dependencyPom.groupId.isEmpty() || dependencyPom.artifactId == null || dependencyPom.artifactId.isEmpty()) {
-			logger.warn("Cannot add dependency; missing coordinates in {}", dependencyPom.path);
-			return false;
-		}
-		if (dependencyPom.groupId.equals(targetPom.groupId) && dependencyPom.artifactId.equals(targetPom.artifactId)) {
-			return false;
-		}
-		if (hasDirectDependency(targetPom.projectElement, dependencyPom.groupId, dependencyPom.artifactId)) {
-			return false;
-		}
-		Element dependenciesElement = ensureDependenciesElement(targetPom);
-		Element dependency = targetPom.document.createElement("dependency");
-		appendChildWithText(targetPom.document, dependency, "groupId", dependencyPom.groupId);
-		appendChildWithText(targetPom.document, dependency, "artifactId", dependencyPom.artifactId);
-		if (dependencyPom.version != null && !dependencyPom.version.isEmpty()) {
-			appendChildWithText(targetPom.document, dependency, "version", dependencyPom.version);
-		}
-		dependenciesElement.appendChild(dependency);
-		return true;
-	}
-
-	private boolean hasDirectDependency(Element projectElement, String groupId, String artifactId) {
-		List<Element> dependenciesBlocks = findDirectChildren(projectElement, "dependencies");
-		for (Element block : dependenciesBlocks) {
-			NodeList children = block.getChildNodes();
-			for (int i = 0; i < children.getLength(); i++) {
-				Node node = children.item(i);
-				if (!(node instanceof Element)) continue;
-				Element dep = (Element) node;
-				if (!matchesName(dep, "dependency")) continue;
-				String existingGroup = textOfDirectChild(dep, "groupId");
-				String existingArtifact = textOfDirectChild(dep, "artifactId");
-				if (groupId.equals(existingGroup) && artifactId.equals(existingArtifact)) {
-					return true;
-				}
-			}
-		}
-		return false;
-	}
-
-	private Element ensureDependenciesElement(PomInfo pom) {
-		Element existing = findDirectChild(pom.projectElement, "dependencies");
-		if (existing != null) {
-			return existing;
-		}
-		Element created = pom.document.createElement("dependencies");
-		pom.projectElement.appendChild(created);
-		return created;
-	}
-
-	private void appendChildWithText(org.w3c.dom.Document document, Element parent, String name, String value) {
-		Element child = document.createElement(name);
-		child.setTextContent(value);
-		parent.appendChild(child);
-	}
-
-	private Element findDirectChild(Element parent, String name) {
-		NodeList nodes = parent.getChildNodes();
-		for (int i = 0; i < nodes.getLength(); i++) {
-			Node node = nodes.item(i);
-			if (node instanceof Element && matchesName(node, name)) {
-				return (Element) node;
-			}
-		}
-		return null;
-	}
-
-	private List<Element> findDirectChildren(Element parent, String name) {
-		List<Element> result = new ArrayList<>();
-		NodeList nodes = parent.getChildNodes();
-		for (int i = 0; i < nodes.getLength(); i++) {
-			Node node = nodes.item(i);
-			if (node instanceof Element && matchesName(node, name)) {
-				result.add((Element) node);
-			}
-		}
-		return result;
-	}
-
-	private boolean matchesName(Node node, String name) {
-		String local = node.getLocalName();
-		String actual = local != null ? local : node.getNodeName();
-		return name.equals(actual);
-	}
-
-	private String textOfDirectChild(Element parent, String name) {
-		Element child = findDirectChild(parent, name);
-		if (child == null) return null;
-		String value = child.getTextContent();
-		return value == null ? null : value.trim();
-	}
-
-	private void writePom(PomInfo pomInfo) throws Exception {
-		TransformerFactory transformerFactory = TransformerFactory.newInstance();
-		Transformer transformer = transformerFactory.newTransformer();
-		transformer.setOutputProperty(OutputKeys.INDENT, "yes");
-		transformer.setOutputProperty("{http://xml.apache.org/xslt}indent-amount", "2");
-		transformer.setOutputProperty(OutputKeys.OMIT_XML_DECLARATION, "no");
-		StringWriter writer = new StringWriter();
-		transformer.transform(new DOMSource(pomInfo.document), new StreamResult(writer));
-		Files.writeString(pomInfo.path, writer.toString(), StandardCharsets.UTF_8);
 	}
 
 	private String rewriteTypeToExtend(String original, TypeDeclaration typeDecl, String superQualifiedName, boolean allowReplace) {
@@ -711,7 +450,7 @@ public class ExtractSuperclassRefactorer {
 		return (CompilationUnit) parser.createAST(null);
 	}
 
-	private static final class RefEnv {
+	static final class RefEnv {
 		final String[] classpath;
 		final String[] sourcepaths;
 		final Map<String, TargetType> fqnToType;
@@ -878,27 +617,9 @@ public class ExtractSuperclassRefactorer {
 		return map;
 	}
 
-	private static final class TargetType {
+	static final class TargetType {
 		final String fqn; final String packageName; final String simpleName; final Path filePath; final TypeDeclaration typeDecl;
 		TargetType(String fqn, String pkg, String simple, Path file, TypeDeclaration decl) { this.fqn=fqn; this.packageName=pkg; this.simpleName=simple; this.filePath=file; this.typeDecl=decl; }
-	}
-
-	private static final class PomInfo {
-		final Path path;
-		final org.w3c.dom.Document document;
-		final Element projectElement;
-		final String groupId;
-		final String artifactId;
-		final String version;
-
-		PomInfo(Path path, org.w3c.dom.Document document, Element projectElement, String groupId, String artifactId, String version) {
-			this.path = path;
-			this.document = document;
-			this.projectElement = projectElement;
-			this.groupId = groupId;
-			this.artifactId = artifactId;
-			this.version = version;
-		}
 	}
 
 	private enum SuperSituationKind { ALL_NONE, EXACTLY_ONE_HAS, TWO_OR_MORE_HAVE }
@@ -908,7 +629,7 @@ public class ExtractSuperclassRefactorer {
 		SuperSituation(SuperSituationKind k, TargetType o) { this.kind=k; this.oneWith=o; }
 	}
 
-	private static final class SuperclassPlacement {
+	static final class SuperclassPlacement {
 		final NameParts name;
 		final Path explicitPath;
 		SuperclassPlacement(NameParts name, Path explicitPath) {
@@ -927,7 +648,7 @@ public class ExtractSuperclassRefactorer {
 		return new SuperSituation(SuperSituationKind.TWO_OR_MORE_HAVE, null);
 	}
 
-	private static final class NameParts {
+	static final class NameParts {
 		final String pkg; final String simple;
 		NameParts(String pkg, String simple) { this.pkg = pkg == null ? "" : pkg; this.simple = simple; }
 		String qualified() { return pkg.isEmpty() ? simple : (pkg + "." + simple); }
