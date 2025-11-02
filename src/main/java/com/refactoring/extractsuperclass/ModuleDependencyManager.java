@@ -19,6 +19,8 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.*;
 import java.util.stream.Stream;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 /**
  * Handles project module analysis and Maven dependency adjustments for the extract-superclass flow.
@@ -32,6 +34,7 @@ final class ModuleDependencyManager {
 		".git",
 		".gradle"
 	));
+	private static final Pattern PLACEHOLDER_PATTERN = Pattern.compile("\\$\\{([^}]+)}");
 
 	private final List<File> projectRoots;
 	private final Logger logger;
@@ -284,8 +287,8 @@ final class ModuleDependencyManager {
 				if (!matchesName(dep, "dependency")) {
 					continue;
 				}
-				String groupId = textOfDirectChild(dep, "groupId");
-				String artifactId = textOfDirectChild(dep, "artifactId");
+				String groupId = pom.resolveProperty(textOfDirectChild(dep, "groupId"));
+				String artifactId = pom.resolveProperty(textOfDirectChild(dep, "artifactId"));
 				ModuleCoordinate coordinate = ModuleCoordinate.from(groupId, artifactId);
 				if (coordinate != null && coordinate.isValid()) {
 					coordinates.add(coordinate);
@@ -403,18 +406,48 @@ final class ModuleDependencyManager {
 		org.w3c.dom.Document document = builder.parse(pomPath.toFile());
 		document.getDocumentElement().normalize();
 		Element projectElement = document.getDocumentElement();
-		String groupId = textOfDirectChild(projectElement, "groupId");
-		String artifactId = textOfDirectChild(projectElement, "artifactId");
-		String version = textOfDirectChild(projectElement, "version");
+		String rawGroupId = textOfDirectChild(projectElement, "groupId");
+		String rawArtifactId = textOfDirectChild(projectElement, "artifactId");
+		String rawVersion = textOfDirectChild(projectElement, "version");
 		String packaging = textOfDirectChild(projectElement, "packaging");
 		Element parentElement = findDirectChild(projectElement, "parent");
-		if ((groupId == null || groupId.isEmpty()) && parentElement != null) {
-			groupId = textOfDirectChild(parentElement, "groupId");
+		String parentGroupId = null;
+		String parentArtifactId = null;
+		String parentVersion = null;
+		if (parentElement != null) {
+			parentGroupId = textOfDirectChild(parentElement, "groupId");
+			parentArtifactId = textOfDirectChild(parentElement, "artifactId");
+			parentVersion = textOfDirectChild(parentElement, "version");
 		}
-		if ((version == null || version.isEmpty()) && parentElement != null) {
-			version = textOfDirectChild(parentElement, "version");
+
+		String effectiveGroupId = firstNonBlank(rawGroupId, parentGroupId);
+		String effectiveArtifactId = firstNonBlank(rawArtifactId, parentArtifactId);
+		String effectiveVersion = firstNonBlank(rawVersion, parentVersion);
+
+		Map<String, String> props = new HashMap<>();
+		if (!isNullOrEmpty(parentGroupId)) props.put("project.parent.groupId", parentGroupId);
+		if (!isNullOrEmpty(parentArtifactId)) props.put("project.parent.artifactId", parentArtifactId);
+		if (!isNullOrEmpty(parentVersion)) props.put("project.parent.version", parentVersion);
+
+		effectiveGroupId = substitutePlaceholders(effectiveGroupId, props);
+		effectiveArtifactId = substitutePlaceholders(effectiveArtifactId, props);
+		effectiveVersion = substitutePlaceholders(effectiveVersion, props);
+
+		if (!isNullOrEmpty(effectiveGroupId)) {
+			props.put("project.groupId", effectiveGroupId);
+			props.put("pom.groupId", effectiveGroupId);
 		}
-		return new PomInfo(pomPath, document, projectElement, groupId, artifactId, version, packaging);
+		if (!isNullOrEmpty(effectiveArtifactId)) {
+			props.put("project.artifactId", effectiveArtifactId);
+			props.put("pom.artifactId", effectiveArtifactId);
+		}
+		if (!isNullOrEmpty(effectiveVersion)) {
+			props.put("project.version", effectiveVersion);
+			props.put("pom.version", effectiveVersion);
+		}
+
+		Map<String, String> immutableProps = Collections.unmodifiableMap(new HashMap<>(props));
+		return new PomInfo(pomPath, document, projectElement, effectiveGroupId, effectiveArtifactId, effectiveVersion, packaging, immutableProps);
 	}
 
 	private boolean addDependencyIfMissing(PomInfo targetPom, PomInfo dependencyPom) {
@@ -426,7 +459,7 @@ final class ModuleDependencyManager {
 		if (dependencyPom.groupId.equals(targetPom.groupId) && dependencyPom.artifactId.equals(targetPom.artifactId)) {
 			return false;
 		}
-		if (hasDirectDependency(targetPom.projectElement, dependencyPom.groupId, dependencyPom.artifactId)) {
+		if (hasDirectDependency(targetPom, targetPom.projectElement, dependencyPom.groupId, dependencyPom.artifactId)) {
 			return false;
 		}
 		Element dependenciesElement = ensureDependenciesElement(targetPom);
@@ -440,7 +473,7 @@ final class ModuleDependencyManager {
 		return true;
 	}
 
-	private boolean hasDirectDependency(Element projectElement, String groupId, String artifactId) {
+	private boolean hasDirectDependency(PomInfo pom, Element projectElement, String groupId, String artifactId) {
 		List<Element> dependenciesBlocks = findDirectChildren(projectElement, "dependencies");
 		for (Element block : dependenciesBlocks) {
 			NodeList children = block.getChildNodes();
@@ -453,8 +486,8 @@ final class ModuleDependencyManager {
 				if (!matchesName(dep, "dependency")) {
 					continue;
 				}
-				String existingGroup = textOfDirectChild(dep, "groupId");
-				String existingArtifact = textOfDirectChild(dep, "artifactId");
+				String existingGroup = pom.resolveProperty(textOfDirectChild(dep, "groupId"));
+				String existingArtifact = pom.resolveProperty(textOfDirectChild(dep, "artifactId"));
 				if (groupId.equals(existingGroup) && artifactId.equals(existingArtifact)) {
 					return true;
 				}
@@ -473,9 +506,45 @@ final class ModuleDependencyManager {
 		return created;
 	}
 
+	private static String firstNonBlank(String primary, String fallback) {
+		return isNullOrEmpty(primary) ? fallback : primary;
+	}
+
+	private static boolean isNullOrEmpty(String value) {
+		return value == null || value.trim().isEmpty();
+	}
+
+	private static String substitutePlaceholders(String value, Map<String, String> properties) {
+		if (value == null) {
+			return null;
+		}
+		String resolved = value;
+		for (int i = 0; i < 10 && resolved.contains("${"); i++) {
+			Matcher matcher = PLACEHOLDER_PATTERN.matcher(resolved);
+			StringBuffer buffer = new StringBuffer();
+			boolean replaced = false;
+			while (matcher.find()) {
+				String key = matcher.group(1);
+				String replacement = properties.get(key);
+				if (replacement == null) {
+					replacement = matcher.group(0);
+				} else {
+					replaced = true;
+				}
+				matcher.appendReplacement(buffer, Matcher.quoteReplacement(replacement));
+			}
+			matcher.appendTail(buffer);
+			if (!replaced) {
+				return buffer.toString();
+			}
+			resolved = buffer.toString();
+		}
+		return resolved;
+	}
+
 	private void appendChildWithText(org.w3c.dom.Document document, Element parent, String name, String value) {
 		Element child = document.createElement(name);
-		child.setTextContent(value);
+		child.setTextContent(value == null ? "" : value);
 		parent.appendChild(child);
 	}
 
@@ -775,8 +844,9 @@ final class ModuleDependencyManager {
 		final String artifactId;
 		final String version;
 		final String packaging;
+		final Map<String, String> properties;
 
-		PomInfo(Path path, org.w3c.dom.Document document, Element projectElement, String groupId, String artifactId, String version, String packaging) {
+		PomInfo(Path path, org.w3c.dom.Document document, Element projectElement, String groupId, String artifactId, String version, String packaging, Map<String, String> properties) {
 			this.path = path;
 			this.document = document;
 			this.projectElement = projectElement;
@@ -784,6 +854,15 @@ final class ModuleDependencyManager {
 			this.artifactId = artifactId;
 			this.version = version;
 			this.packaging = packaging;
+			this.properties = properties == null ? Collections.emptyMap() : properties;
+		}
+
+		String resolveProperty(String value) {
+			if (value == null) {
+				return null;
+			}
+			String resolved = substitutePlaceholders(value, properties);
+			return resolved == null ? null : resolved.trim();
 		}
 	}
 }

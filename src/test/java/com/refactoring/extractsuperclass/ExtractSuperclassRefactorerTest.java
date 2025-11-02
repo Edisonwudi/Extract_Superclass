@@ -9,6 +9,8 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Arrays;
 
+import org.slf4j.LoggerFactory;
+
 import static org.junit.jupiter.api.Assertions.*;
 
 public class ExtractSuperclassRefactorerTest {
@@ -86,7 +88,7 @@ public class ExtractSuperclassRefactorerTest {
     }
 
     @Test
-    public void bothHaveSuperclass_thenDoNothing(@TempDir Path tmp) throws Exception {
+    public void bothHaveDistinctSuperclasses_createsStandaloneClass(@TempDir Path tmp) throws Exception {
         Path src = tmp.resolve("src");
         Files.createDirectories(src);
 
@@ -114,6 +116,18 @@ public class ExtractSuperclassRefactorerTest {
         String bAfter = Files.readString(bFile, StandardCharsets.UTF_8);
         assertTrue(aAfter.contains("class A extends P1"));
         assertTrue(bAfter.contains("class B extends P2"));
+        assertFalse(aAfter.contains("extends AbstractBase"));
+        assertFalse(bAfter.contains("extends AbstractBase"));
+
+        String superName = res.getSuperclassQualifiedName();
+        assertNotNull(superName, "Result should report newly created class name");
+        assertEquals("com.example.AbstractBase", superName);
+
+        Path generated = pkgDir.resolve("AbstractBase.java");
+        assertTrue(Files.exists(generated), "Standalone class should be created");
+        String generatedContent = Files.readString(generated, StandardCharsets.UTF_8);
+        assertTrue(generatedContent.contains("public class AbstractBase"));
+        assertFalse(generatedContent.contains("abstract class"));
     }
 
     @Test
@@ -340,5 +354,71 @@ public class ExtractSuperclassRefactorerTest {
 
         assertFalse(result.getModifiedFiles().stream().anyMatch(path -> path.endsWith("module-c" + File.separator + "pom.xml")),
                 "Dependency update for module-c should be skipped due to cycle risk");
+    }
+
+    @Test
+    public void resolvesPlaceholdersWhenDetectingCycles(@TempDir Path tmp) throws Exception {
+        Path projectRoot = tmp.resolve("workspace");
+        Files.createDirectories(projectRoot);
+
+        Path moduleApp = projectRoot.resolve("module-app");
+        Path moduleGui = projectRoot.resolve("module-gui");
+        Files.createDirectories(moduleApp.resolve("src/main/java/com/example/app"));
+        Files.createDirectories(moduleGui.resolve("src/main/java/com/example/gui"));
+
+        String parentPom = "<project xmlns=\"http://maven.apache.org/POM/4.0.0\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\""
+            + " xsi:schemaLocation=\"http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd\">"
+            + "<modelVersion>4.0.0</modelVersion>"
+            + "<groupId>com.example</groupId>"
+            + "<artifactId>parent</artifactId>"
+            + "<version>1.0.0</version>"
+            + "<packaging>pom</packaging>"
+            + "</project>";
+        Files.writeString(projectRoot.resolve("pom.xml"), parentPom, StandardCharsets.UTF_8);
+
+        String moduleAppPom = "<project xmlns=\"http://maven.apache.org/POM/4.0.0\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\""
+            + " xsi:schemaLocation=\"http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd\">"
+            + "<modelVersion>4.0.0</modelVersion>"
+            + "<parent><groupId>com.example</groupId><artifactId>parent</artifactId><version>1.0.0</version></parent>"
+            + "<artifactId>module-app</artifactId>"
+            + "<dependencies>"
+            + "  <dependency><groupId>${project.groupId}</groupId><artifactId>module-gui</artifactId><version>${project.version}</version></dependency>"
+            + "</dependencies>"
+            + "</project>";
+        Files.writeString(moduleApp.resolve("pom.xml"), moduleAppPom, StandardCharsets.UTF_8);
+
+        String moduleGuiPom = "<project xmlns=\"http://maven.apache.org/POM/4.0.0\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\""
+            + " xsi:schemaLocation=\"http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd\">"
+            + "<modelVersion>4.0.0</modelVersion>"
+            + "<parent><groupId>com.example</groupId><artifactId>parent</artifactId><version>1.0.0</version></parent>"
+            + "<artifactId>module-gui</artifactId>"
+            + "</project>";
+        Files.writeString(moduleGui.resolve("pom.xml"), moduleGuiPom, StandardCharsets.UTF_8);
+
+        Path superFile = moduleApp.resolve("src/main/java/com/example/app/AbstractBase.java");
+        Files.writeString(superFile, "package com.example.app;\n\npublic class AbstractBase { }\n", StandardCharsets.UTF_8);
+
+        Path guiFile = moduleGui.resolve("src/main/java/com/example/gui/ColorIcon.java");
+        Files.writeString(guiFile, "package com.example.gui;\n\npublic class ColorIcon { }\n", StandardCharsets.UTF_8);
+
+        ModuleDependencyManager manager = new ModuleDependencyManager(
+            Arrays.asList(projectRoot.toFile()),
+            LoggerFactory.getLogger("test-placeholders")
+        );
+
+        ExtractSuperclassRefactorer.TargetType target = new ExtractSuperclassRefactorer.TargetType(
+            "com.example.gui.ColorIcon",
+            "com.example.gui",
+            "ColorIcon",
+            guiFile,
+            null
+        );
+
+        java.util.List<Path> changes = manager.ensureModuleDependencies(superFile, Arrays.asList(target));
+        assertTrue(changes.isEmpty(), "No pom should be modified when dependency would form a cycle");
+
+        String updatedGuiPom = Files.readString(moduleGui.resolve("pom.xml"), StandardCharsets.UTF_8);
+        assertFalse(updatedGuiPom.contains("<artifactId>module-app</artifactId>"),
+            "module-gui pom must not gain dependency on module-app; cycle should be prevented");
     }
 }

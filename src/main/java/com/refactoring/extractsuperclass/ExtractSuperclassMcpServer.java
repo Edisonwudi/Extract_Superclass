@@ -99,7 +99,10 @@ public class ExtractSuperclassMcpServer {
 
 		ObjectNode tool = objectMapper.createObjectNode();
 		tool.put("name", "extract_superclass");
-		tool.put("description", "Create a shared abstract superclass for the selected classes.");
+		tool.put("description", "Create a shared abstract superclass for the selected classes.1. No existing superclass among targets: create a new abstract superclass and update all targets to extend it.\r\n" + //
+						"2. Exactly one target already extends something: reuse that superclass for the remaining targets; no new class is created.\r\n" + //
+						"3. All targets already share the same superclass: create a new abstract class that extends the shared parent, and rewire the targets to extend the new intermediate class.\r\n" + //
+						"4. Targets have incompatible superclasses: create a new concrete class in the planned location without touching the targets' inheritance.");
 
 		ObjectNode inputSchema = objectMapper.createObjectNode();
 		inputSchema.put("type", "object");

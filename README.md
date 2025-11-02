@@ -1,4 +1,4 @@
-# Extract Superclass
+﻿# Extract Superclass
 
 ## Overview
 Extract Superclass creates a shared abstract parent for a set of existing classes. It relies on Eclipse JDT for source rewriting and understands multi-module Maven builds.
@@ -62,13 +62,13 @@ The `extract_superclass` tool accepts:
 - Optional `superQualifiedName` / `superName`
 - Optional `dryRun`, `verbose`
 
-Responses include a human-readable summary plus `modifiedFiles` and `executionTimeMs` when available.
+Responses include a human-readable summary plus `modifiedFiles` and `executionTimeMs` when available. 
 
 ## Behaviour Summary
-1. If none of the target classes share a superclass, a new abstract class is created and all targets extend it.
-2. If exactly one class already extends a superclass, the remaining classes adopt that superclass; no new class is created.
-3. If all targets already share the same superclass, it is reused.
-4. If targets have incompatible superclasses, the refactoring is skipped.
+1. No existing superclass among targets: create a new abstract superclass and update all targets to extend it.
+2. Exactly one target already extends something: reuse that superclass for the remaining targets; no new class is created.
+3. All targets already share the same superclass: create a new abstract class that extends the shared parent, and rewire the targets to extend the new intermediate class.
+4. Targets have incompatible superclasses: create a new concrete class in the planned location without touching the targets’ inheritance.
 
 ## Build & Test
 ```bash
