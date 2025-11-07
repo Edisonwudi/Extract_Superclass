@@ -1,5 +1,6 @@
 package com.refactoring.extractsuperclass;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
@@ -7,22 +8,24 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import java.io.BufferedReader;
+import java.io.BufferedInputStream;
 import java.io.File;
 import java.io.IOException;
-import java.io.InputStreamReader;
+import java.io.OutputStreamWriter;
 import java.io.PrintWriter;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
 
 public class ExtractSuperclassMcpServer {
 	private static final Logger logger = LoggerFactory.getLogger(ExtractSuperclassMcpServer.class);
 	private static final String SERVER_NAME = "Extract Superclass Refactoring MCP Server";
 	private static final String VERSION = "1.0.0";
 
-	private final ObjectMapper objectMapper = new ObjectMapper();
-	private final BufferedReader reader = new BufferedReader(new InputStreamReader(System.in));
-	private final PrintWriter writer = new PrintWriter(System.out, true);
+    private final ObjectMapper objectMapper = new ObjectMapper();
+    private final BufferedInputStream inputStream = new BufferedInputStream(System.in);
+    private final PrintWriter writer = new PrintWriter(new OutputStreamWriter(System.out, StandardCharsets.UTF_8), true);
 
 	public static void main(String[] args) {
 		new ExtractSuperclassMcpServer().run();
@@ -32,38 +35,134 @@ public class ExtractSuperclassMcpServer {
 		logger.info("Starting MCP Server: {}", SERVER_NAME);
 		try {
 			while (true) {
-				String line = reader.readLine();
-				if (line == null) {
+				String payload;
+				try {
+					payload = readFrame();
+				} catch (IOException readEx) {
+					logger.error("Failed to read JSON-RPC input: {}", readEx.getMessage(), readEx);
 					return;
 				}
-				if (line.trim().isEmpty()) {
+
+				if (payload == null) {
+					return;
+				}
+
+				JsonNode request;
+				try {
+					request = objectMapper.readTree(payload);
+				} catch (JsonProcessingException parseEx) {
+					logger.error("Received malformed JSON-RPC payload: {}", parseEx.getOriginalMessage(), parseEx);
 					continue;
 				}
-				try {
-					JsonNode request = objectMapper.readTree(line);
-					JsonNode response = handleRequest(request);
-					if (response == null) {
-						continue;
-					}
-					writer.println(objectMapper.writeValueAsString(response));
-					writer.flush();
-				} catch (Exception ex) {
-					logger.error("Error processing request: {}", ex.getMessage(), ex);
-					ObjectNode errorResponse = createErrorResponse(null, -32603, "Internal error", ex.getMessage());
-					writer.println(objectMapper.writeValueAsString(errorResponse));
-					writer.flush();
+
+				JsonNode response = handleRequest(request);
+				if (response == null) {
+					continue;
 				}
+				writer.println(objectMapper.writeValueAsString(response));
+				writer.flush();
 			}
 		} catch (IOException ioEx) {
 			logger.error("IO error: {}", ioEx.getMessage(), ioEx);
 		}
 	}
 
+	private String readFrame() throws IOException {
+		while (true) {
+			int contentLength = -1;
+
+			while (true) {
+				String headerLine = readHeaderLine();
+				if (headerLine == null) {
+					return null;
+				}
+
+				if (headerLine.isEmpty()) {
+					if (contentLength >= 0) {
+						break;
+					}
+					continue;
+				}
+
+				int colonIndex = headerLine.indexOf(':');
+				if (colonIndex <= 0 || !isHeaderName(headerLine, colonIndex)) {
+					String trimmed = headerLine.trim();
+					if (!trimmed.isEmpty() && (trimmed.startsWith("{") || trimmed.startsWith("["))) {
+						return trimmed;
+					}
+					logger.warn("Ignoring unrecognised header line: {}", headerLine);
+					continue;
+				}
+
+				String headerName = headerLine.substring(0, colonIndex).trim().toLowerCase(Locale.ROOT);
+				String headerValue = headerLine.substring(colonIndex + 1).trim();
+
+				if ("content-length".equals(headerName)) {
+					try {
+						contentLength = Integer.parseInt(headerValue);
+					} catch (NumberFormatException nfEx) {
+						throw new IOException("Invalid Content-Length header value: " + headerValue, nfEx);
+					}
+				}
+			}
+
+			if (contentLength < 0) {
+				logger.warn("Missing Content-Length header; waiting for the next frame.");
+				continue;
+			}
+
+			byte[] payload = inputStream.readNBytes(contentLength);
+			if (payload.length < contentLength) {
+				throw new IOException("Unexpected end of stream while reading JSON-RPC payload.");
+			}
+			return new String(payload, StandardCharsets.UTF_8);
+		}
+	}
+
+	private String readHeaderLine() throws IOException {
+		StringBuilder line = new StringBuilder();
+		int ch;
+		boolean seenCarriageReturn = false;
+		while ((ch = inputStream.read()) != -1) {
+			if (ch == '\r') {
+				seenCarriageReturn = true;
+				continue;
+			}
+			if (ch == '\n') {
+				break;
+			}
+			if (seenCarriageReturn) {
+				line.append('\r');
+				seenCarriageReturn = false;
+			}
+			line.append((char) ch);
+		}
+
+		if (ch == -1 && line.length() == 0 && !seenCarriageReturn) {
+			return null;
+		}
+		return line.toString();
+	}
+
+	private boolean isHeaderName(String headerLine, int colonIndex) {
+		for (int i = 0; i < colonIndex; i++) {
+			char ch = headerLine.charAt(i);
+			if (!Character.isLetter(ch) && ch != '-' && ch != '_') {
+				return false;
+			}
+		}
+		return true;
+	}
+
 	private JsonNode handleRequest(JsonNode request) {
-		String method = request.path("method").asText();
+		JsonNode id = extractId(request);
+		String method = request.path("method").asText(null);
 		JsonNode params = request.path("params");
-		JsonNode id = request.path("id");
 		logger.debug("Handling request: method={}, id={}", method, id);
+		if (method == null || method.isEmpty()) {
+			return respondOrIgnore(id, -32600, "Invalid Request", "Missing method field");
+		}
+
 		switch (method) {
 			case "initialize":
 				return handleInitialize(id);
@@ -72,11 +171,16 @@ public class ExtractSuperclassMcpServer {
 			case "tools/call":
 				return handleToolsCall(id, params);
 			default:
-				return createErrorResponse(id, -32601, "Method not found", "Unknown method: " + method);
+				return respondOrIgnore(id, -32601, "Method not found", "Unknown method: " + method);
 		}
 	}
 
 	private JsonNode handleInitialize(JsonNode id) {
+		if (id == null) {
+			logger.debug("Ignoring initialize notification without id.");
+			return null;
+		}
+
 		ObjectNode response = objectMapper.createObjectNode();
 		response.put("jsonrpc", "2.0");
 		response.set("id", id);
@@ -90,6 +194,11 @@ public class ExtractSuperclassMcpServer {
 	}
 
 	private JsonNode handleToolsList(JsonNode id) {
+		if (id == null) {
+			logger.debug("Ignoring tools/list notification without id.");
+			return null;
+		}
+
 		ObjectNode response = objectMapper.createObjectNode();
 		response.put("jsonrpc", "2.0");
 		response.set("id", id);
@@ -149,11 +258,15 @@ public class ExtractSuperclassMcpServer {
 		JsonNode arguments = params.path("arguments");
 		logger.info("Calling tool: {}", toolName);
 
+		if (toolName == null || toolName.isEmpty()) {
+			return respondOrIgnore(id, -32602, "Invalid parameters", "Missing tool name.");
+		}
+
 		if ("extract_superclass".equals(toolName)) {
 			return handleExtractSuperclass(id, arguments);
 		}
 
-		return createErrorResponse(id, -32601, "Tool not found", "Unknown tool: " + toolName);
+		return respondOrIgnore(id, -32601, "Tool not found", "Unknown tool: " + toolName);
 	}
 
 	private JsonNode handleExtractSuperclass(JsonNode id, JsonNode arguments) {
@@ -162,7 +275,7 @@ public class ExtractSuperclassMcpServer {
 		projectRoots.addAll(collectStringValues(arguments.path("projectRoots")));
 
 		if (projectRoots.isEmpty()) {
-			return createErrorResponse(id, -32602, "Invalid parameters", "Missing required parameter: projectRoot");
+			return respondOrIgnore(id, -32602, "Invalid parameters", "Missing required parameter: projectRoot");
 		}
 
 		List<String> classNames = new ArrayList<>();
@@ -170,7 +283,7 @@ public class ExtractSuperclassMcpServer {
 		classNames.addAll(collectStringValues(arguments.path("className")));
 
 		if (classNames.isEmpty()) {
-			return createErrorResponse(id, -32602, "Invalid parameters", "Missing required parameter: classNames");
+			return respondOrIgnore(id, -32602, "Invalid parameters", "Missing required parameter: classNames");
 		}
 
 		String superQualifiedName = optionalText(arguments, "superQualifiedName");
@@ -196,10 +309,10 @@ public class ExtractSuperclassMcpServer {
 		}
 
 		if (!invalidRoots.isEmpty()) {
-			return createErrorResponse(id, -32602, "Invalid parameters", "Provided projectRoot path(s) must exist and be directories: " + invalidRoots);
+			return respondOrIgnore(id, -32602, "Invalid parameters", "Provided projectRoot path(s) must exist and be directories: " + invalidRoots);
 		}
 		if (projectRootFiles.isEmpty()) {
-			return createErrorResponse(id, -32602, "Invalid parameters", "No usable project root paths were provided.");
+			return respondOrIgnore(id, -32602, "Invalid parameters", "No usable project root paths were provided.");
 		}
 
 		logger.info(
@@ -223,7 +336,12 @@ public class ExtractSuperclassMcpServer {
 			result = refactorer.performRefactoring(request);
 		} catch (Exception ex) {
 			logger.error("Refactoring failed with exception", ex);
-			return createErrorResponse(id, -32603, "Internal error", ex.getMessage());
+			return respondOrIgnore(id, -32603, "Internal error", ex.getMessage());
+		}
+
+		if (id == null) {
+			logger.debug("Tool call completed without id; no response will be sent.");
+			return null;
 		}
 
 		ObjectNode response = objectMapper.createObjectNode();
@@ -303,7 +421,9 @@ public class ExtractSuperclassMcpServer {
 	private ObjectNode createErrorResponse(JsonNode id, int code, String message, String data) {
 		ObjectNode response = objectMapper.createObjectNode();
 		response.put("jsonrpc", "2.0");
-		response.set("id", id);
+		if (id != null) {
+			response.set("id", id);
+		}
 
 		ObjectNode error = objectMapper.createObjectNode();
 		error.put("code", code);
@@ -313,6 +433,29 @@ public class ExtractSuperclassMcpServer {
 		}
 		response.set("error", error);
 		return response;
+	}
+
+	private JsonNode respondOrIgnore(JsonNode id, int code, String message, String data) {
+		if (id == null) {
+			logger.debug("Dropping error response '{}': request did not specify an id.", message);
+			return null;
+		}
+		return createErrorResponse(id, code, message, data);
+	}
+
+	private JsonNode extractId(JsonNode request) {
+		if (request == null) {
+			return null;
+		}
+		JsonNode idNode = request.get("id");
+		if (idNode == null || idNode.isMissingNode() || idNode.isNull()) {
+			return null;
+		}
+		if (idNode.isTextual() || idNode.isNumber()) {
+			return idNode;
+		}
+		logger.warn("Unsupported id type in request: {}", idNode);
+		return null;
 	}
 
 	private ObjectNode createStringProperty(String description, boolean required) {

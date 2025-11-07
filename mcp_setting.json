@@ -3,16 +3,21 @@
     "extract-superclass-refactoring": {
       "disabled": false,
       "type": "stdio",
-      "command": "java",
+      "command": "powershell.exe",
       "args": [
-        "-jar",
-        "C:/Users/wudi/Desktop/extension_develop/Extract_Superclass/target/extractsuperclass-mcp-server.jar"
+        "-NoLogo",
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        "C:/Users/wudi/Desktop/extension_develop/Extract_Superclass/scripts/run-mcp-server.ps1"
       ],
-      "timeout": 60000,
+      "timeout": 60,
       "autoApprove": [
         "extract_superclass"
       ],
       "env": {
+        "EXTRACT_SUPERCLASS_JAVA_HOME": "C:/Users/wudi/.jdks/corretto-21.0.6",
         "JAVA_OPTS": "-Xmx512m"
       }
     }

@@ -38,19 +38,38 @@ java -jar target/extractsuperclass-cli.jar /path/to/project --classNames com.exa
 ## Placement Strategy
 The tool analyses the Maven dependency graph for all modules that contain the selected classes. It places the new superclass in a module that every target already depends on (directly or transitively), preventing circular dependencies in the resulting build. When `--superName` is omitted the package is inferred from the chosen module, and the file is created under `src/main/java`.
 
-## MCP Server
-Run `mvn package` to produce `target/extractsuperclass-mcp-server.jar`, then configure the server as an MCP stdio tool:
+MCP Server
+
+Run mvn package to produce target/extractsuperclass-mcp-server.jar, then use the provided PowerShell wrapper script to set the Java 21 runtime environment and connect to MCP:
+
+$env:EXTRACT_SUPERCLASS_JAVA_HOME = 'C:\Program Files\Java\jdk-21'  # Example path, can point to any JDK 21  
+powershell -NoLogo -NoProfile -ExecutionPolicy Bypass -File scripts/run-mcp-server.ps1  
+
+
+The script will attempt to use EXTRACT_SUPERCLASS_JAVA_HOME, JAVA_HOME_21, and JAVA_HOME in order, checking if java -version matches 21; if it can't find a suitable JDK, it will throw an error. Additionally, it will automatically locate target/extractsuperclass-mcp-server.jar, so make sure to run mvn package to generate this file first. If you need to view debug information, you can add -Verbose at the end of the command.
+
+Configuration example (such as in VS Code Kilo Code's mcp_setting.json):
 
 ```json
 {
   "mcpServers": {
     "extract-superclass": {
       "type": "stdio",
-      "command": "java",
-      "args": ["-jar", "C:/path/to/extractsuperclass-mcp-server.jar"],
-      "timeout": 60000,
+      "command": "powershell.exe",
+      "args": [
+        "-NoLogo",
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        "C:/path/to/Extract_Superclass/scripts/run-mcp-server.ps1"
+      ],
+      "timeout": 60,
       "autoApprove": ["extract_superclass"],
-      "env": {"JAVA_OPTS": "-Xmx512m"}
+      "env": {
+        "EXTRACT_SUPERCLASS_JAVA_HOME": "C:/Program Files/Java/jdk-21",
+        "JAVA_OPTS": "-Xmx512m"
+      }
     }
   }
 }
@@ -63,6 +82,18 @@ The `extract_superclass` tool accepts:
 - Optional `dryRun`, `verbose`
 
 Responses include a human-readable summary plus `modifiedFiles` and `executionTimeMs` when available. 
+
+Troubleshooting
+
+
+"No Java 21 runtime detected" message: Check if EXTRACT_SUPERCLASS_JAVA_HOME points to the correct JDK root directory (containing bin\java.exe). Run & "$env:EXTRACT_SUPERCLASS_JAVA_HOME\bin\java.exe" -version to verify the version is 21. If needed, add -Verbose at the end of the script command to view detailed logs.
+
+
+"extractsuperclass-mcp-server.jar not found" message: Ensure that you have run mvn package in the project root directory, and that the script hasn't been moved to another directory.
+
+
+Client still using old configuration: After modifying the MCP configuration file, restart the client or execute Developer: Reload Window in VS Code to apply the new commands and environment variables.
+
 
 ## Behaviour Summary
 1. No existing superclass among targets: create a new abstract superclass and update all targets to extend it.
